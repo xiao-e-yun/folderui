@@ -34,7 +34,7 @@ class Guess(FolderUI):
     def draw(self):                      # 每一幀重新宣告畫面，不可修改狀態
         self.file("rules.md", "猜 1-100")
         self.button("guess", "<數字>")
-        self.reply(f"已經猜了 {len(self.tries)} 次")
+        self.status(f"已經猜了 {len(self.tries)} 次")
 
     def action(self, name, args):        # 按鈕被按下：回傳文字，或 raise ValueError 代表失敗
         n = int(args[0])
@@ -48,7 +48,7 @@ Guess("/tmp/my-ui").run()
 |---|---|---|
 | `file(path, content)` | `draw()` | 宣告一個檔案；沒宣告的會自動刪除 |
 | `button(path, hint, options=None)` | `draw()` | 宣告一個按鈕 → `<path>.sh`，路徑可以分層（`players/2/kick`） |
-| `reply(text)` | `draw()` | 腳本回應時印出的目前狀況 |
+| `status(text)` | `draw()` | 目前狀況：每次回應時附在最後（不是對這次操作的回覆，而是回應那一刻的狀態） |
 | `notify(text)` | `action()` / `receive()` | 累積一則消息，下一次回應時送出 |
 | `close()` | `action()` / `receive()` | 結束：移除按鈕、回應等待中的腳本 |
 | `push(msg)` | 其他執行緒 | 送訊息給這個 UI，會呼叫 `receive(msg)` |
@@ -91,6 +91,7 @@ for ui in server.clients.values():
 from folderui import Session
 s = Session("/tmp/folderui-auction-xxxx/player_0")
 s.ready()
+print(s.status())                        # 第一次進來還沒有回應，可以從這裡讀目前狀況
 while buttons := s.buttons():            # {路徑: {hint, options}}，空的代表結束
     ok, text = s.press("bid", "40")
 ```
@@ -99,7 +100,7 @@ while buttons := s.buttons():            # {路徑: {hint, options}}，空的代
 
 - 腳本預設無限等待。設定 `FOLDERUI_TIMEOUT=秒數` 會在逾時後以 exit code 2 結束；
   **再執行一次同樣的指令即可繼續等待或拿到回應**（不會重複送出）。回應被讀走之前，該按鈕的腳本會保留。
-- 協定檔案都是隱藏檔：`.request`、`.response`、`.done`、`.buttons.json`。
+- 協定檔案都是隱藏檔：`.request`、`.response`、`.done`、`.state.json`。
   不能執行腳本的 agent 也可以直接寫 `.request`（按鈕路徑與參數以 NUL 分隔）。
 
 ## 範例

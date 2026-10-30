@@ -14,15 +14,22 @@ class Session:
     def ready(self, timeout: float | None = None) -> bool:
         """等到資料夾畫好（第一次可以讀到按鈕列表）。"""
         deadline = None if timeout is None else time.monotonic() + timeout
-        while not (self.root / ".buttons.json").exists():
+        while not (self.root / ".state.json").exists():
             if deadline is not None and time.monotonic() > deadline:
                 return False
             time.sleep(self.poll)
         return True
 
+    def state(self) -> dict:
+        return json.loads(read_text(self.root / ".state.json", "{}") or "{}")
+
+    def status(self) -> str:
+        """目前狀況（draw() 裡 status() 宣告的文字）。"""
+        return self.state().get("status", "")
+
     def buttons(self) -> dict[str, dict]:
         """目前可按的按鈕 {路徑: {hint, options}}；空的代表已結束（或還輪不到你）。"""
-        return json.loads(read_text(self.root / ".buttons.json", "{}"))
+        return self.state().get("buttons", {})
 
     def read(self, path: str) -> str:
         return read_text(self.root / path, "")

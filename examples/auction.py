@@ -284,18 +284,18 @@ class PlayerUI(FolderUI):
         todo = v["todo"]
         if todo == "join":
             self.button("join", "<名字>")
-            self.reply("請輸入名字加入遊戲（規則見 rules.md）。")
+            self.status("請輸入名字加入遊戲（規則見 rules.md）。")
         elif todo == "pick":
             self.button("pick", "<寶物名稱>，詳見 hand.md", options=v["options"])
-            self.reply(f"第 {v['round']}/{v['rounds']} 輪：選一件寶物拿去拍賣，其餘兩件丟棄。")
+            self.status(f"第 {v['round']}/{v['rounds']} 輪：選一件寶物拿去拍賣，其餘兩件丟棄。")
         elif todo == "describe":
             self.button("describe", "<介紹文字>（買家只看得到名稱和這段介紹）")
-            self.reply(f"輪到你當賣家：\n{v['my_lot']}")
+            self.status(f"輪到你當賣家：\n{v['my_lot']}")
         elif todo == "bid":
             if v["min_bid"] <= v["money"]:
                 self.button("bid", f"<金額 {v['min_bid']}-{v['money']}>  公開喊價")
             self.button("pass", "退出這件拍品")
-            self.reply(f"輪到你喊價。{v['seller']} 正在拍賣「{v['lot_name']}」：\n> {v['pitch']}\n\n"
+            self.status(f"輪到你喊價。{v['seller']} 正在拍賣「{v['lot_name']}」：\n> {v['pitch']}\n\n"
                        f"{v['bidding']}\n\n你有 💰 {v['money']}。")
 
     def action(self, name, args):

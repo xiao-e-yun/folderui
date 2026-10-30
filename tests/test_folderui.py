@@ -18,7 +18,7 @@ class Counter(FolderUI):
     def draw(self):
         self.file("count.md", f"{self.n}\n")
         self.button("add", "<1-3>")
-        self.reply(f"目前 {self.n}")
+        self.status(f"目前 {self.n}")
 
     def action(self, name, args):
         if args != ["1"]:
@@ -43,6 +43,7 @@ def counter(tmp_path):
 def test_session_press(counter):
     ui, s = counter
     assert set(s.buttons()) == {"add"}
+    assert s.status() == "目前 0"
     ok, text = s.press("add", "2", timeout=5)
     assert not ok and "只能加 1" in text
     ok, text = s.press("add", "1", timeout=5)

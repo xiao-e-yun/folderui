@@ -1,19 +1,19 @@
 """FolderUI：把一個資料夾變成給人類或 AI agent 用的立即式 GUI。
 
 子類別實作三個方法：
-    draw()                 每一幀重新宣告畫面：file()、button()、reply()。不可修改狀態。
+    draw()                 每一幀重新宣告畫面：file()、button()、status()。不可修改狀態。
     action(name, args)     按鈕被按下時呼叫：回傳文字，或 raise 代表失敗。只有這裡修改狀態。
     receive(msg)           收到 push() 的訊息（例如伺服器推播）。
 
 資料夾裡只有 draw() 宣告的檔案和按鈕腳本（<path>.sh）。執行按鈕腳本後，腳本會一直等待，
 直到「操作處理完之後，第一個有按鈕可按的畫面」出現（或 close()）才回應：
-    action 的回傳值 + 這段期間的 notify() + reply() + 目前可按的按鈕
+    action 的回傳值 + 這段期間的 notify() + status() + 目前可按的按鈕
 
 腳本與主機之間的協定（隱藏檔）：
     .request    腳本寫入：按鈕路徑與參數，以 NUL 分隔
     .response   主機寫入：第一行為 exit code，之後為回應內容
     .done       主機回應後把 .request 改名為 .done；腳本讀完回應後刪除它
-    .buttons.json  目前的按鈕列表（給程式型 agent 用）
+    .state.json   目前的 status 與按鈕列表（給程式型 agent 用）
 """
 import json
 import os
@@ -83,7 +83,7 @@ class FolderUI:
         self._inbox: queue.Queue = queue.Queue()
         self._files: dict[str, str] = {}
         self._buttons: dict[str, tuple[str, list[str] | None]] = {}
-        self._reply = ""
+        self._status = ""
         self._disk_files: dict[str, str] = {}      # 磁碟上由本框架管理的檔案
         self._disk_scripts: dict[str, str] = {}
         self._notes: list[str] = []
@@ -109,8 +109,9 @@ class FolderUI:
     def button(self, path: str, hint: str = "", options: list[str] | None = None) -> None:
         self._buttons[_check_path(path)] = (hint, options)
 
-    def reply(self, text: str) -> None:
-        self._reply = text
+    def status(self, text: str) -> None:
+        """目前狀況：每次回應時附在最後，也寫進 .state.json。"""
+        self._status = text
 
     # ---- 在 action() / receive() 中呼叫 ----
 
@@ -196,8 +197,8 @@ class FolderUI:
         code, text = self._pending
         parts = [text] if text else []
         parts += self._notes
-        if self._reply:
-            parts.append(self._reply)
+        if self._status:
+            parts.append(self._status)
         if self.closed:
             parts.append("── 已結束 ──")
         else:
@@ -213,7 +214,7 @@ class FolderUI:
         self._pending = None
 
     def _redraw(self) -> None:
-        self._files, self._buttons, self._reply = {}, {}, ""
+        self._files, self._buttons, self._status = {}, {}, ""
         self._call(self.draw)
         if self.closed:
             self._buttons = {}
@@ -223,9 +224,10 @@ class FolderUI:
             scripts.setdefault(f"{name}.sh", self._script(name, hint))
         self._sync(self._disk_files, self._files, None)
         self._sync(self._disk_scripts, scripts, 0o755)
-        write_text(self.root / ".buttons.json", json.dumps(
-            {p: {"hint": h, "options": o} for p, (h, o) in self._buttons.items()},
-            ensure_ascii=False, indent=2) + "\n")
+        write_text(self.root / ".state.json", json.dumps({
+            "status": self._status,
+            "buttons": {p: {"hint": h, "options": o} for p, (h, o) in self._buttons.items()},
+        }, ensure_ascii=False, indent=2) + "\n")
 
     def _sync(self, disk: dict[str, str], want: dict[str, str], mode: int | None) -> None:
         for path in set(disk) - set(want):

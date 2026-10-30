@@ -20,7 +20,7 @@ class Guess(FolderUI):
         if self.tries:  # 只往後加 → 適合當紀錄
             self.file("history.md", "".join(f"- {n}：{r}\n" for n, r in self.tries))
         self.button("guess", "<1-100 的整數>")
-        self.reply(f"已經猜了 {len(self.tries)} 次。")
+        self.status(f"已經猜了 {len(self.tries)} 次。")
 
     def action(self, name, args):
         if len(args) != 1 or not args[0].isdigit() or not 1 <= int(args[0]) <= 100:
