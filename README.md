@@ -116,3 +116,6 @@ uv run python examples/auction_bot.py <資料夾> bot0   # 拍賣用的隨機 bo
 uv sync
 uv run pytest
 ```
+
+發布：在 PyPI 設定 trusted publisher（repo `xiao-e-yun/folderui`、workflow `publish.yml`、environment `pypi`），
+之後改 `pyproject.toml` 的版本號並推送 `v*` tag 就會自動發布。
