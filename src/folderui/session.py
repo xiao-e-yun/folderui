@@ -1,4 +1,4 @@
-"""程式型 agent 用的客戶端：和按鈕腳本走同一個檔案協定。"""
+"""用程式操作 FolderUI：和按鈕腳本走同一個檔案協定（給 bot、測試、自訂工具迴圈用）。"""
 import json
 import time
 from pathlib import Path
@@ -27,14 +27,14 @@ class Session:
         """目前狀況（draw() 裡 status() 宣告的文字）。"""
         return self.state().get("status", "")
 
-    def buttons(self) -> dict[str, dict]:
+    def inputs(self) -> dict[str, dict]:
         """目前可按的按鈕 {路徑: {hint, options}}；空的代表已結束（或還輪不到你）。"""
-        return self.state().get("buttons", {})
+        return self.state().get("inputs", {})
 
     def read(self, path: str) -> str:
         return read_text(self.root / path, "")
 
-    def press(self, path: str, *args: str, timeout: float | None = None) -> tuple[bool, str]:
+    def input(self, path: str, *args: str, timeout: float | None = None) -> tuple[bool, str]:
         """按下按鈕並等待回應，回傳 (是否成功, 回應內容)。"""
         request = self.root / ".request"
         if request.exists():

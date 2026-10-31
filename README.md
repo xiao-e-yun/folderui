@@ -14,18 +14,20 @@ pip install folderui     # 或 uv add folderui；只用標準函式庫，需要 
 
 ```console
 $ ./bid.sh 40
-⏳ 已送出，等待中…              ← 其他人還在出價，腳本卡住
+⏳ 已送出，等待中…              ← 其他人還在喊價，腳本卡住
 ✅ 已出價 40
-開標：bob 5、carol 15、你 40
-🔨 你以 40 得標 …
-🔔 bob 拍賣「月光琉璃盞」…
+📣 bob 45（目前最高：bob 45）    ← 這段期間發生的事（log）
+📣 carol 退出
+輪到你喊價，目前最高 bob 45     ← 目前狀況（status）
 
 ── 可以做的事 ──
-./bid.sh  <金額 1-60>  密封出價
-./pass.sh  不出價
+./bid.sh  <金額 50-100>  公開喊價
+./pass.sh  退出這件拍品
 ```
 
 ## 寫一個 UI
+
+子類別只要實作兩個方法：`draw()` 宣告畫面，`action()` 處理按鈕。
 
 ```python
 from folderui import FolderUI
@@ -33,11 +35,12 @@ from folderui import FolderUI
 class Guess(FolderUI):
     def draw(self):                      # 每一幀重新宣告畫面，不可修改狀態
         self.file("rules.md", "猜 1-100")
-        self.button("guess", "<數字>")
+        for n, result in self.tries:
+            self.log(f"{n}：{result}")   # 回應時只附上還沒送出過的
+        self.input("guess", "<數字>")
         self.status(f"已經猜了 {len(self.tries)} 次")
 
     def action(self, name, args):        # 按鈕被按下：回傳文字，或 raise ValueError 代表失敗
-        n = int(args[0])
         ...
         return "太大"
 
@@ -47,11 +50,12 @@ Guess("/tmp/my-ui").run()
 | 方法 | 在哪裡呼叫 | 作用 |
 |---|---|---|
 | `file(path, content)` | `draw()` | 宣告一個檔案；沒宣告的會自動刪除 |
-| `button(path, hint, options=None)` | `draw()` | 宣告一個按鈕 → `<path>.sh`，路徑可以分層（`players/2/kick`） |
-| `status(text)` | `draw()` | 目前狀況：每次回應時附在最後（不是對這次操作的回覆，而是回應那一刻的狀態） |
-| `notify(text)` | `action()` / `receive()` | 累積一則消息，下一次回應時送出 |
-| `close()` | `action()` / `receive()` | 結束：移除按鈕、回應等待中的腳本 |
-| `push(msg)` | 其他執行緒 | 送訊息給這個 UI，會呼叫 `receive(msg)` |
+| `input(path, hint, options=None)` | `draw()` | 宣告一個按鈕 → `<path>.sh`，路徑可以分層（`players/2/kick`） |
+| `log(content)` | `draw()` | 宣告一則訊息；每一幀都宣告完整的序列，回應時只附上還沒送出過的 |
+| `status(text)` | `draw()` | 目前狀況：附在每次回應的最後（是回應那一刻的狀態，不是對操作的回覆） |
+| `close()` | `draw()` 或任何地方 | 結束：移除按鈕、回應等待中的腳本，`run()` 返回 |
+| `refresh()` | 任何執行緒 | 狀態被別人改變了：讓這個 UI 重畫（不會等待） |
+| `run(background=False)` | | 執行主迴圈；`background=True` 時在背景執行緒執行並回傳該執行緒 |
 
 **回應規則只有一條**：操作處理完之後，第一個「有按鈕可按」的畫面出現時（或 `close()`）才回應。
 
@@ -59,41 +63,52 @@ Guess("/tmp/my-ui").run()
 - 查詢類操作 → 按鈕還在 → 立刻回應
 - 送出後要等別人 → 沒有按鈕 → 等到輪到你
 
-## 多人：1 個伺服器 + N 個客戶端
+## 多人：共用狀態 + 一把鎖 + refresh()
+
+框架不提供伺服器。每個參與者一個 FolderUI，共用同一個遊戲物件：
 
 ```python
-class MyServer(Server):
-    def handle(self, who, cmd):          # 純邏輯；raise ValueError 代表規則不允許
+class Game:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.uis = []
         ...
-        for p in self.clients:
-            self.push(p, Update(...))     # 推播給客戶端
+
+    def bid(self, who, amount):
+        with self.lock:
+            ...                          # 純邏輯；raise ValueError 代表規則不允許
+        for ui in self.uis:
+            ui.refresh()                 # 只是標記「需要重畫」，不會卡住
         return "✅ 已出價"
 
 class PlayerUI(FolderUI):
-    def action(self, name, args):
-        return self.server.call(self.me, ("bid", int(args[0])))   # 同步呼叫，例外會傳回來
-    def receive(self, update):
-        self.view = update.view          # 伺服器推播 → 框架自動重畫
+    def draw(self):
+        with self.game.lock:             # 直接讀共用狀態
+            v = self.game.view(self.me)
+        ...
 
-server = MyServer()
-for i in range(n):
-    server.connect(i, PlayerUI(f"{root}/player_{i}", server, i))
-server.start()
-for ui in server.clients.values():
-    ui.start()
+    def action(self, name, args):
+        return self.game.bid(self.me, int(args[0]))
+
+game = Game()
+game.uis = [PlayerUI(f"{root}/player_{i}", game, i) for i in range(n)]
+for t in [ui.run(background=True) for ui in game.uis]:
+    t.join()
 ```
 
-框架不管多人同步：伺服器在一個執行緒依序處理請求，推播走無上限佇列（伺服器永遠不等客戶端）。
+每個 UI 在自己的執行緒裡畫畫面、處理按鈕；`refresh()` 是唯一需要跨執行緒呼叫的方法。
 
-## 程式型 agent
+## 用程式操作
+
+`Session` 走和按鈕腳本同一個檔案協定，給 bot、測試，或自己寫工具迴圈的程式用：
 
 ```python
 from folderui import Session
 s = Session("/tmp/folderui-auction-xxxx/player_0")
 s.ready()
 print(s.status())                        # 第一次進來還沒有回應，可以從這裡讀目前狀況
-while buttons := s.buttons():            # {路徑: {hint, options}}，空的代表結束
-    ok, text = s.press("bid", "40")
+while inputs := s.inputs():              # {路徑: {hint, options}}，空的代表結束
+    ok, text = s.input("bid", "40")
 ```
 
 ## 細節

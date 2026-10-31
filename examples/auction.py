@@ -1,4 +1,4 @@
-"""多人範例：拍賣。1 個伺服器（純遊戲邏輯）＋ N 個玩家客戶端 ＋ 1 個觀眾客戶端。
+"""多人範例：拍賣。一個共用的遊戲物件（純遊戲邏輯，用一把鎖保護）＋ N 個玩家 UI ＋ 1 個觀眾 UI。
 
     uv run python examples/auction.py [--players 4] [--rounds 3] [--seed N] [--dir DIR]
 
@@ -7,10 +7,11 @@
 import argparse
 import random
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from folderui import FolderUI, Server
+from folderui import FolderUI
 
 NAMES = ["龍紋古劍", "月光琉璃盞", "青銅羅盤", "鳳羽披風", "沉船金幣", "賢者手稿",
          "翡翠面具", "星象儀", "黑曜石戒指", "古神雕像", "鍊金術士之瓶", "王冠碎片",
@@ -50,19 +51,15 @@ class Treasure:
         return "\n".join(lines + [f"- {t}（{v:+d}）" for t, v in self.traits])
 
 
-@dataclass
-class Update:
-    view: dict
-    events: list[str]
+# ---------------- 遊戲：純邏輯，不知道資料夾的存在 ----------------
 
-
-# ---------------- 伺服器：純遊戲邏輯，不知道資料夾的存在 ----------------
-
-class AuctionServer(Server):
+class Auction:
     step = STEP
 
     def __init__(self, n, rounds=1, seed=None, money=100):
-        super().__init__()
+        self.lock = threading.Lock()  # 所有讀寫都在這把鎖裡
+        self.uis: list[FolderUI] = []  # 狀態改變時要通知重畫的 UI
+        self.events: list[str] = []    # 所有人都看得到的訊息，只往後加
         self.rng = random.Random(seed)
         self.n, self.rounds, self.round = n, rounds, 0
         self.names: list[str | None] = [None] * n
@@ -77,7 +74,6 @@ class AuctionServer(Server):
         self.active: set[int] = set()        # 還沒退出這件拍品的買家
         self.turn = None                     # 輪到誰喊價
         self.bidlog: list[str] = []
-        self.outbox: dict = {}
         self.deal()
 
     def deal(self):
@@ -91,18 +87,15 @@ class AuctionServer(Server):
     def name(self, p):
         return self.names[p] or f"player_{p}"
 
-    def say(self, text, to=None):
-        for who in (self.clients if to is None else to):
-            self.outbox.setdefault(who, []).append(text)
+    def say(self, text):
+        self.events.append(text)
 
-    def publish(self):
-        for who in self.clients:
-            self.push(who, Update(self.view(who), self.outbox.pop(who, [])))
-
-    def handle(self, p, cmd):
-        kind, arg = cmd
-        result = getattr(self, f"do_{kind}")(p, arg)
-        self.publish()
+    def act(self, p, kind, arg):
+        """玩家 p 的操作：違反規則就 raise ValueError，成功就通知所有 UI 重畫。"""
+        with self.lock:
+            result = getattr(self, f"do_{kind}")(p, arg)
+        for ui in self.uis:
+            ui.refresh()
         return result
 
     def do_join(self, p, name):
@@ -253,20 +246,18 @@ def roster_md(v):
 
 
 class PlayerUI(FolderUI):
-    def __init__(self, path, server, me):
+    def __init__(self, path, game, me):
         super().__init__(path)
-        self.server, self.me = server, me
-        self.view = server.view(me)
-
-    def receive(self, update):
-        self.view = update.view
-        for e in update.events:
-            self.notify(e)
-        if self.view["phase"] == "over":
-            self.close()
+        self.game, self.me = game, me
 
     def draw(self):
-        v = self.view
+        with self.game.lock:
+            v = self.game.view(self.me)
+            events = list(self.game.events)
+        for e in events:
+            self.log(e)
+        if v["phase"] == "over":
+            self.close()
         self.file("rules.md", RULES.format(rounds=v["rounds"], step=STEP))
         self.file("players.md", roster_md(v))
         if v["history"]:  # 只往後加 → 適合當紀錄
@@ -283,58 +274,55 @@ class PlayerUI(FolderUI):
 
         todo = v["todo"]
         if todo == "join":
-            self.button("join", "<名字>")
+            self.input("join", "<名字>")
             self.status("請輸入名字加入遊戲（規則見 rules.md）。")
         elif todo == "pick":
-            self.button("pick", "<寶物名稱>，詳見 hand.md", options=v["options"])
+            self.input("pick", "<寶物名稱>，詳見 hand.md", options=v["options"])
             self.status(f"第 {v['round']}/{v['rounds']} 輪：選一件寶物拿去拍賣，其餘兩件丟棄。")
         elif todo == "describe":
-            self.button("describe", "<介紹文字>（買家只看得到名稱和這段介紹）")
+            self.input("describe", "<介紹文字>（買家只看得到名稱和這段介紹）")
             self.status(f"輪到你當賣家：\n{v['my_lot']}")
         elif todo == "bid":
             if v["min_bid"] <= v["money"]:
-                self.button("bid", f"<金額 {v['min_bid']}-{v['money']}>  公開喊價")
-            self.button("pass", "退出這件拍品")
+                self.input("bid", f"<金額 {v['min_bid']}-{v['money']}>  公開喊價")
+            self.input("pass", "退出這件拍品")
             self.status(f"輪到你喊價。{v['seller']} 正在拍賣「{v['lot_name']}」：\n> {v['pitch']}\n\n"
                        f"{v['bidding']}\n\n你有 💰 {v['money']}。")
 
     def action(self, name, args):
         text = " ".join(args).strip()
         if name == "pass":
-            return self.server.call(self.me, ("bid", None))
+            return self.game.act(self.me, "bid", None)
         if not text:
             raise ValueError(f"用法：./{name}.sh <內容>")
         if name == "bid":
             if not text.isdigit():
                 raise ValueError("出價必須是正整數")
-            return self.server.call(self.me, ("bid", int(text)))
-        return self.server.call(self.me, (name, text))
+            return self.game.act(self.me, "bid", int(text))
+        return self.game.act(self.me, name, text)
 
 
 class SpectatorUI(FolderUI):
     """觀眾：看得到所有拍品的真相，沒有按鈕。紀錄寫成只往後加的 log.md。"""
 
-    def __init__(self, path, server):
+    def __init__(self, path, game):
         super().__init__(path)
-        self.view = server.view("spectator")
-        self.log: list[str] = []
-
-    def receive(self, update):
-        self.view = update.view
-        self.log += update.events
-        if self.view["phase"] == "over":
-            self.close()
+        self.game = game
 
     def draw(self):
-        v = self.view
+        with self.game.lock:
+            v = self.game.view("spectator")
+            events = list(self.game.events)
+        if v["phase"] == "over":
+            self.close()
         self.file("players.md", roster_md(v))
         if v["lots"]:
             self.file("truth.md", "# 所有拍品的真相\n\n" + "\n\n".join(v["lots"]) + "\n")
         if v["lot_name"]:
             self.file("lot.md", f"# 拍品：{v['lot_name']}\n\n> {v['pitch'] or '（賣家正在寫介紹…）'}\n\n"
                       + (v["bidding"] or "") + "\n")
-        if self.log:
-            self.file("log.md", "".join(e + "\n\n" for e in self.log))
+        if events:
+            self.file("log.md", "".join(e + "\n\n" for e in events))
 
 
 def main():
@@ -348,20 +336,17 @@ def main():
         raise SystemExit("玩家數需為 2-6")
     root = Path(args.dir or tempfile.mkdtemp(prefix="folderui-auction-"))
 
-    server = AuctionServer(args.players, args.rounds, args.seed)
-    clients = {p: PlayerUI(root / f"player_{p}", server, p) for p in range(args.players)}
-    clients["spectator"] = SpectatorUI(root / "spectator", server)
-    for who, ui in clients.items():
-        server.connect(who, ui)
+    game = Auction(args.players, args.rounds, args.seed)
+    uis = {p: PlayerUI(root / f"player_{p}", game, p) for p in range(args.players)}
+    uis["spectator"] = SpectatorUI(root / "spectator", game)
+    game.uis = list(uis.values())
 
-    server.start()
-    threads = [ui.start() for ui in clients.values()]
-    for who, ui in clients.items():
+    threads = [ui.run(background=True) for ui in uis.values()]
+    for who, ui in uis.items():
         print(f"{who}: {ui.root}", flush=True)
     for t in threads:
         t.join()
-    server.stop()
-    print(server.final_result())
+    print(game.final_result())
 
 
 if __name__ == "__main__":

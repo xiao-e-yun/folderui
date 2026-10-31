@@ -19,7 +19,9 @@ class Guess(FolderUI):
         self.file("rules.md", "# 猜數字\n\n我想了一個 1-100 的整數，用 `./guess.sh <數字>` 猜猜看。\n")
         if self.tries:  # 只往後加 → 適合當紀錄
             self.file("history.md", "".join(f"- {n}：{r}\n" for n, r in self.tries))
-        self.button("guess", "<1-100 的整數>")
+        for n, r in self.tries:
+            self.log(f"{n}：{r}")
+        self.input("guess", "<1-100 的整數>")
         self.status(f"已經猜了 {len(self.tries)} 次。")
 
     def action(self, name, args):
@@ -31,7 +33,7 @@ class Guess(FolderUI):
         if n == self.secret:
             self.close()
             return f"🎉 答對了！答案是 {n}，共猜了 {len(self.tries)} 次"
-        return f"{n} {result}"
+        return f"✅ 猜了 {n}"
 
 
 if __name__ == "__main__":

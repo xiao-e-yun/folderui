@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from folderui import FolderUI, Server, Session
+from folderui import FolderUI, Session
 
 
 class Counter(FolderUI):
@@ -17,7 +17,7 @@ class Counter(FolderUI):
 
     def draw(self):
         self.file("count.md", f"{self.n}\n")
-        self.button("add", "<1-3>")
+        self.input("add", "<1-3>")
         self.status(f"目前 {self.n}")
 
     def action(self, name, args):
@@ -32,7 +32,7 @@ class Counter(FolderUI):
 @pytest.fixture
 def counter(tmp_path):
     ui = Counter(tmp_path / "ui")
-    thread = ui.start()
+    thread = ui.run(background=True)
     s = Session(ui.root)
     assert s.ready(timeout=5)
     yield ui, s
@@ -42,11 +42,11 @@ def counter(tmp_path):
 
 def test_session_press(counter):
     ui, s = counter
-    assert set(s.buttons()) == {"add"}
+    assert set(s.inputs()) == {"add"}
     assert s.status() == "目前 0"
-    ok, text = s.press("add", "2", timeout=5)
+    ok, text = s.input("add", "2", timeout=5)
     assert not ok and "只能加 1" in text
-    ok, text = s.press("add", "1", timeout=5)
+    ok, text = s.input("add", "1", timeout=5)
     assert ok and text.startswith("加到 1") and "./add.sh" in text
     assert s.read("count.md") == "1\n"
 
@@ -54,9 +54,9 @@ def test_session_press(counter):
 def test_close_removes_buttons(counter):
     ui, s = counter
     for _ in range(3):
-        ok, text = s.press("add", "1", timeout=5)
+        ok, text = s.input("add", "1", timeout=5)
     assert ok and "已結束" in text
-    assert s.buttons() == {}
+    assert s.inputs() == {}
     for _ in range(50):  # 回應被讀走後，下一幀才會移除保留的腳本
         if not (ui.root / "add.sh").exists():
             break
@@ -72,85 +72,86 @@ def test_shell_button(counter):
     assert r.returncode == 1 and "只能加 1" in r.stdout
 
 
-class ReadyServer(Server):
-    """兩個人都按 ready 才一起開始。"""
+class Lobby:
+    """兩個人都按 ready 才一起開始：共用狀態 + 一把鎖 + refresh()。"""
 
     def __init__(self):
-        super().__init__()
+        self.lock = threading.Lock()
         self.ready: set = set()
+        self.events: list[str] = []
+        self.uis: list[FolderUI] = []
 
-    def handle(self, who, cmd):
-        self.ready.add(who)
-        if len(self.ready) == len(self.clients):
-            for p in self.clients:
-                self.push(p, "go")
+    def press_ready(self, who):
+        with self.lock:
+            self.ready.add(who)
+            if len(self.ready) == len(self.uis):
+                self.events.append("🔔 開始了")
+        for ui in self.uis:
+            ui.refresh()
         return "✅ 準備好了"
 
 
-class Lobby(FolderUI):
-    def __init__(self, path, server, me):
+class LobbyUI(FolderUI):
+    def __init__(self, path, lobby, me):
         super().__init__(path)
-        self.server, self.me, self.state = server, me, "lobby"
+        self.lobby, self.me, self.played = lobby, me, False
 
     def draw(self):
-        if self.state == "lobby":
-            self.button("ready")
-        elif self.state == "waiting":
-            pass  # 沒有按鈕 → 腳本繼續等
-        else:
-            self.button("play")
+        with self.lobby.lock:
+            ready, started = self.me in self.lobby.ready, len(self.lobby.ready) == len(self.lobby.uis)
+            events = list(self.lobby.events)
+        for e in events:
+            self.log(e)
+        if self.played:
+            self.close()
+        elif not ready:
+            self.input("ready")
+        elif started:
+            self.input("play")
+        # 已準備但還沒開始 → 沒有按鈕 → 腳本繼續等
 
     def action(self, name, args):
         if name == "ready":
-            self.state = "waiting"
-            return self.server.call(self.me, "ready")
-        self.close()
+            return self.lobby.press_ready(self.me)
+        self.played = True
         return "played"
 
-    def receive(self, msg):
-        self.state = "started"
-        self.notify("🔔 開始了")
+
+def make_lobby(tmp_path):
+    lobby = Lobby()
+    lobby.uis = [LobbyUI(tmp_path / f"p{p}", lobby, p) for p in range(2)]
+    threads = [ui.run(background=True) for ui in lobby.uis]
+    sessions = [Session(ui.root) for ui in lobby.uis]
+    assert all(s.ready(timeout=5) for s in sessions)
+    return lobby, threads, sessions
 
 
 def test_multiplayer_blocks_until_everyone_ready(tmp_path):
-    server = ReadyServer()
-    uis = {p: Lobby(tmp_path / f"p{p}", server, p) for p in range(2)}
-    for p, ui in uis.items():
-        server.connect(p, ui)
-    server.start()
-    threads = [ui.start() for ui in uis.values()]
-    s0, s1 = Session(uis[0].root), Session(uis[1].root)
-    assert s0.ready(timeout=5) and s1.ready(timeout=5)
+    lobby, threads, (s0, s1) = make_lobby(tmp_path)
 
     result = {}
-    t = threading.Thread(target=lambda: result.update(r=s0.press("ready", timeout=10)))
+    t = threading.Thread(target=lambda: result.update(r=s0.input("ready", timeout=10)))
     t.start()
     t.join(timeout=0.5)
     assert t.is_alive()  # 另一個人還沒準備好，p0 的按鈕卡住
 
-    ok, text = s1.press("ready", timeout=10)
+    ok, text = s1.input("ready", timeout=10)
     t.join(timeout=10)
     assert ok and "開始了" in text and "./play.sh" in text
     ok, text = result["r"]
     assert ok and "開始了" in text
 
     for s in (s0, s1):
-        s.press("play", timeout=10)
+        ok, text = s.input("play", timeout=10)
+        assert ok and "已結束" in text and "開始了" not in text  # log 只送出還沒看過的
     for th in threads:
-        th.join(timeout=5)
-    server.stop()
+        th.join(timeout=10)
+        assert not th.is_alive()
 
 
 def test_timeout_and_resume(tmp_path):
-    server = ReadyServer()
-    uis = {p: Lobby(tmp_path / f"p{p}", server, p) for p in range(2)}
-    for p, ui in uis.items():
-        server.connect(p, ui)
-    server.start()
-    for ui in uis.values():
-        ui.start()
-    assert Session(uis[0].root).ready(timeout=5)
-    script = str(uis[0].root / "ready.sh")
+    lobby, threads, (s0, s1) = make_lobby(tmp_path)
+    script = str(lobby.uis[0].root / "ready.sh")
     env = {**os.environ, "FOLDERUI_TIMEOUT": "1"}
 
     r = subprocess.run([script], capture_output=True, text=True, timeout=10, env=env)
@@ -159,9 +160,8 @@ def test_timeout_and_resume(tmp_path):
     r = subprocess.run([script, "other"], capture_output=True, text=True, timeout=10, env=env)
     assert r.returncode == 1 and "還在等待" in r.stdout  # 不同的指令會被拒絕
 
-    Session(uis[1].root).press("ready", timeout=10)
+    s1.input("ready", timeout=10)
     r = subprocess.run([script], capture_output=True, text=True, timeout=10, env=env)
     assert r.returncode == 0 and "開始了" in r.stdout  # 同樣的指令 → 拿到回應
-    for ui in uis.values():
+    for ui in lobby.uis:
         ui.close()
-    server.stop()

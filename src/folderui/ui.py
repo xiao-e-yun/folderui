@@ -1,23 +1,23 @@
 """FolderUI：把一個資料夾變成給人類或 AI agent 用的立即式 GUI。
 
-子類別實作三個方法：
-    draw()                 每一幀重新宣告畫面：file()、button()、status()。不可修改狀態。
-    action(name, args)     按鈕被按下時呼叫：回傳文字，或 raise 代表失敗。只有這裡修改狀態。
-    receive(msg)           收到 push() 的訊息（例如伺服器推播）。
+子類別實作兩個方法：
+    draw()                 每一幀重新宣告畫面，不可修改狀態：file()、input()、log()、status()、close()
+    action(name, args)     按鈕被按下時呼叫：回傳文字，或 raise 代表失敗
 
 資料夾裡只有 draw() 宣告的檔案和按鈕腳本（<path>.sh）。執行按鈕腳本後，腳本會一直等待，
 直到「操作處理完之後，第一個有按鈕可按的畫面」出現（或 close()）才回應：
-    action 的回傳值 + 這段期間的 notify() + status() + 目前可按的按鈕
+    action 的回傳值 + 還沒看過的 log() + status() + 目前可按的按鈕
+
+狀態被其他執行緒改變時（例如其他玩家的操作），呼叫 refresh() 讓這個 UI 重畫。
 
 腳本與主機之間的協定（隱藏檔）：
-    .request    腳本寫入：按鈕路徑與參數，以 NUL 分隔
-    .response   主機寫入：第一行為 exit code，之後為回應內容
-    .done       主機回應後把 .request 改名為 .done；腳本讀完回應後刪除它
-    .state.json   目前的 status 與按鈕列表（給程式型 agent 用）
+    .request     腳本寫入：按鈕路徑與參數，以 NUL 分隔
+    .response    主機寫入：第一行為 exit code，之後為回應內容
+    .done        主機回應後把 .request 改名為 .done；腳本讀完回應後刪除它
+    .state.json  目前的 status 與按鈕列表（給 Session 用）
 """
 import json
 import os
-import queue
 import shlex
 import sys
 import threading
@@ -80,15 +80,16 @@ class FolderUI:
         self.root = Path(path).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.closed = False
-        self._inbox: queue.Queue = queue.Queue()
+        self._dirty = threading.Event()
         self._files: dict[str, str] = {}
-        self._buttons: dict[str, tuple[str, list[str] | None]] = {}
+        self._inputs: dict[str, tuple[str, list[str] | None]] = {}
+        self._log: list[str] = []
         self._status = ""
+        self._seen = 0                              # 上次回應時已經送出幾則 log
         self._disk_files: dict[str, str] = {}      # 磁碟上由本框架管理的檔案
         self._disk_scripts: dict[str, str] = {}
-        self._notes: list[str] = []
         self._pending: tuple[int, str] | None = None
-        self._pending_button: tuple[str, str] | None = None  # (路徑, hint)：回應被讀走前保留它的腳本
+        self._pending_input: tuple[str, str] | None = None  # (路徑, hint)：回應被讀走前保留它的腳本
 
     # ---- 子類別實作 ----
 
@@ -98,79 +99,62 @@ class FolderUI:
     def action(self, name: str, args: list[str]) -> str | None:
         raise ValueError(f"沒有處理按鈕 {name}")
 
-    def receive(self, msg) -> None:
-        pass
-
     # ---- 在 draw() 中呼叫 ----
 
     def file(self, path: str, content: str) -> None:
         self._files[_check_path(path)] = content
 
-    def button(self, path: str, hint: str = "", options: list[str] | None = None) -> None:
-        self._buttons[_check_path(path)] = (hint, options)
+    def input(self, path: str, hint: str = "", options: list[str] | None = None) -> None:
+        """宣告一個按鈕 → <path>.sh"""
+        self._inputs[_check_path(path)] = (hint, options)
+
+    def log(self, content: str) -> None:
+        """宣告一則訊息。每一幀都宣告完整的訊息序列，回應時只附上還沒送出過的。"""
+        self._log.append(content)
 
     def status(self, text: str) -> None:
         """目前狀況：每次回應時附在最後，也寫進 .state.json。"""
         self._status = text
 
-    # ---- 在 action() / receive() 中呼叫 ----
-
-    def notify(self, text: str) -> None:
-        """累積一則消息，在下一次回應時一起送出。"""
-        self._notes.append(text)
-
     def close(self) -> None:
-        """結束：移除所有按鈕，回應正在等待的腳本，然後停止。"""
+        """結束：移除所有按鈕，回應正在等待的腳本，然後 run() 返回。"""
         self.closed = True
+        self._dirty.set()
 
-    # ---- 給其他執行緒 ----
+    # ---- 任何執行緒 ----
 
-    def push(self, msg) -> None:
-        self._inbox.put(msg)
+    def refresh(self) -> None:
+        """狀態被其他執行緒改變了：讓這個 UI 重畫（不會等待）。"""
+        self._dirty.set()
 
-    def start(self) -> threading.Thread:
-        t = threading.Thread(target=self.run, name=f"folderui:{self.root.name}", daemon=True)
-        t.start()
-        return t
-
-    # ---- 主迴圈 ----
-
-    def run(self) -> None:
+    def run(self, background: bool = False) -> threading.Thread | None:
+        """執行主迴圈，直到 close()。background=True 時在背景執行緒執行並回傳該執行緒。"""
+        if background:
+            t = threading.Thread(target=self.run, name=f"folderui:{self.root.name}", daemon=True)
+            t.start()
+            return t
         for name in PROTOCOL_FILES:
             (self.root / name).unlink(missing_ok=True)
         self._redraw()
         deadline = None
-        while not (self.closed and self._pending is None and self._pending_button is None):
+        while not (self.closed and self._pending is None and self._pending_input is None):
             if self.closed and self._pending is None:  # 已結束：最後的回應最多等 close_grace 秒被讀走
                 deadline = deadline or time.monotonic() + self.close_grace
                 if time.monotonic() > deadline:
                     break
-            changed = False
-            try:
-                msg = self._inbox.get(timeout=self.poll)
-                self._call(self.receive, msg)
-                changed = True
-            except queue.Empty:
-                pass
+            changed = self._dirty.wait(self.poll)
+            self._dirty.clear()
             changed |= self._take_request()
-            changed |= self._drain()
-            if self._pending is None and self._pending_button and not (self.root / ".done").exists():
-                self._pending_button = None  # 回應已被讀走
+            if self._pending is None and self._pending_input and not (self.root / ".done").exists():
+                self._pending_input = None  # 回應已被讀走
                 changed = True
             if changed:
                 self._redraw()
-            if self._pending is not None and (self._buttons or self.closed):
+            if self._pending is not None and (self._inputs or self.closed):
                 self._respond()
+        return None
 
-    def _drain(self) -> bool:
-        changed = False
-        while True:
-            try:
-                msg = self._inbox.get_nowait()
-            except queue.Empty:
-                return changed
-            self._call(self.receive, msg)
-            changed = True
+    # ---- 內部 ----
 
     def _take_request(self) -> bool:
         if self._pending is not None:
@@ -180,10 +164,10 @@ class FolderUI:
         except FileNotFoundError:
             return False
         name, *args = [x.decode("utf-8", "replace") for x in raw.split(b"\0")[:-1]] or [""]
-        if name not in self._buttons:
+        if name not in self._inputs:
             self._pending = (1, f"❌ 按鈕 {name} 已經不存在")
             return True
-        self._pending_button = (name, self._buttons[name][0])
+        self._pending_input = (name, self._inputs[name][0])
         try:
             result = self.action(name, args)
             self._pending = (0, result or "")
@@ -196,37 +180,37 @@ class FolderUI:
     def _respond(self) -> None:
         code, text = self._pending
         parts = [text] if text else []
-        parts += self._notes
+        parts += self._log[min(self._seen, len(self._log)):]
+        self._seen = len(self._log)
         if self._status:
             parts.append(self._status)
         if self.closed:
             parts.append("── 已結束 ──")
         else:
             lines = ["── 可以做的事 ──"]
-            for path, (hint, options) in self._buttons.items():
+            for path, (hint, options) in self._inputs.items():
                 lines.append(f"./{path}.sh" + (f"  {hint}" if hint else ""))
                 if options:
                     lines.append("    選項：" + " / ".join(options))
             parts.append("\n".join(lines))
         write_text(self.root / ".response", f"{code}\n" + "\n\n".join(parts) + "\n")
         os.replace(self.root / ".request", self.root / ".done")
-        self._notes = []
         self._pending = None
 
     def _redraw(self) -> None:
-        self._files, self._buttons, self._status = {}, {}, ""
+        self._files, self._inputs, self._log, self._status = {}, {}, [], ""
         self._call(self.draw)
         if self.closed:
-            self._buttons = {}
-        scripts = {f"{p}.sh": self._script(p, hint) for p, (hint, _) in self._buttons.items()}
-        if self._pending_button:  # 逾時後重新執行同一個指令＝繼續等待或拿回應，所以腳本要留到回應被讀走
-            name, hint = self._pending_button
+            self._inputs = {}
+        scripts = {f"{p}.sh": self._script(p, hint) for p, (hint, _) in self._inputs.items()}
+        if self._pending_input:  # 逾時後重新執行同一個指令＝繼續等待或拿回應，所以腳本要留到回應被讀走
+            name, hint = self._pending_input
             scripts.setdefault(f"{name}.sh", self._script(name, hint))
         self._sync(self._disk_files, self._files, None)
         self._sync(self._disk_scripts, scripts, 0o755)
         write_text(self.root / ".state.json", json.dumps({
             "status": self._status,
-            "buttons": {p: {"hint": h, "options": o} for p, (h, o) in self._buttons.items()},
+            "inputs": {p: {"hint": h, "options": o} for p, (h, o) in self._inputs.items()},
         }, ensure_ascii=False, indent=2) + "\n")
 
     def _sync(self, disk: dict[str, str], want: dict[str, str], mode: int | None) -> None:
