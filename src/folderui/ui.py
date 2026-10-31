@@ -155,9 +155,9 @@ class FolderUI:
         except FileNotFoundError:
             return False
         name, *args = [x.decode("utf-8", "replace") for x in raw.split(b"\0")[:-1]] or [""]
-        if name not in self._inputs:
-            self._pending = (1, f"❌ 按鈕 {name} 已經不存在")
-            return True
+        if name not in self._inputs:  # 腳本執行時畫面已經重畫了：渲染層的問題，不經過 action/display，立刻回應
+            self._write_response(1, f"❌ 按鈕 {name} 現在不能用（畫面已經更新）")
+            return False
         self._pending_input = name
         try:
             result = self.action(name, args)
@@ -176,10 +176,13 @@ class FolderUI:
             print(f"[folderui:{self.root.name}] display() 發生錯誤：", file=sys.stderr)
             traceback.print_exc()
             text = result
+        self._write_response(code, text)
+        self._pending = None
+
+    def _write_response(self, code: int, text: str | None) -> None:
         text = (text or "").strip("\n")
         write_text(self.root / ".response", f"{code}\n" + (text + "\n" if text else ""))
         os.replace(self.root / ".request", self.root / ".done")
-        self._pending = None
 
     def _redraw(self) -> None:
         self._files, self._inputs = {}, []

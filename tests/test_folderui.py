@@ -165,3 +165,11 @@ def test_interrupted_and_resume(tmp_path):
     assert r.returncode == 0 and "開始了" in r.stdout  # 同樣的指令 → 拿到回應
     for ui in lobby.uis:
         ui.close()
+
+
+def test_stale_input_is_rejected_without_calling_action(counter):
+    ui, s = counter
+    calls = []
+    ui.action = lambda name, args: calls.append(name)
+    ok, text = s.input("gone", timeout=5)  # 畫面上沒有這個按鈕（例如舊畫面的腳本）
+    assert not ok and "現在不能用" in text and calls == []
