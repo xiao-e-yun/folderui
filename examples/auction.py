@@ -292,14 +292,19 @@ class PlayerUI(FolderUI):
             new, self.seen = self.game.events[self.seen:], len(self.game.events)
         todo = v["todo"]
         if todo == "join":
-            now = "請輸入名字加入遊戲（規則見 rules.md）。"
+            now = "👉 用 ./join.sh <名字> 加入遊戲（規則見 rules.md）。"
         elif todo == "pick":
-            now = f"第 {v['round']}/{v['rounds']} 輪：選一件寶物拿去拍賣，其餘兩件丟棄。選項：" + " / ".join(v["options"])
+            now = (f"👉 第 {v['round']}/{v['rounds']} 輪：用 ./pick.sh <寶物名稱> 選一件拿去拍賣（詳見 hand.md）。"
+                   "選項：" + " / ".join(v["options"]))
         elif todo == "describe":
-            now = f"輪到你當賣家：\n{v['my_lot']}"
+            now = f"👉 輪到你當賣家，用 ./describe.sh <介紹文字> 介紹你的拍品：\n{v['my_lot']}"
         elif todo == "bid":
-            now = (f"輪到你喊價。{v['seller']} 正在拍賣「{v['lot_name']}」：\n> {v['pitch']}\n\n"
-                   f"{v['bidding']}\n\n你有 💰 {v['money']}，這次至少要出 {v['min_bid']}。")
+            how = (f"./bid.sh <金額>（至少 {v['min_bid']}）或 ./pass.sh" if "bid" in self.inputs
+                   else "你的錢不夠加價，只能 ./pass.sh")
+            now = (f"{v['seller']} 正在拍賣「{v['lot_name']}」：\n> {v['pitch']}\n\n"
+                   f"{v['bidding']}\n\n👉 輪到你喊價（你有 💰 {v['money']}）：{how}")
+        elif self.closed:
+            now = "── 遊戲結束 ──"
         else:
             now = ""
         return "\n\n".join(x for x in [result, *new, now] if x)

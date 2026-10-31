@@ -22,7 +22,9 @@ class Guess(FolderUI):
         self.input("guess")
 
     def display(self, result):
-        return f"{result}\n\n已經猜了 {len(self.tries)} 次。"
+        if self.closed:
+            return result
+        return f"{result}\n\n已經猜了 {len(self.tries)} 次，用 ./guess.sh <數字> 繼續猜。"
 
     def action(self, name, args):
         if len(args) != 1 or not args[0].isdigit() or not 1 <= int(args[0]) <= 100:

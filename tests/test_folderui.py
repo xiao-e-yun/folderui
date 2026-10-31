@@ -45,7 +45,7 @@ def test_session_press(counter):
     ok, text = s.input("add", "2", timeout=5)
     assert not ok and "只能加 1" in text
     ok, text = s.input("add", "1", timeout=5)
-    assert ok and text.startswith("加到 1") and "./add.sh" in text
+    assert ok and text == "加到 1"
     assert s.read("count.md") == "1\n"
 
 
@@ -53,7 +53,7 @@ def test_close_removes_buttons(counter):
     ui, s = counter
     for _ in range(3):
         ok, text = s.input("add", "1", timeout=5)
-    assert ok and "已結束" in text
+    assert ok and text == "加到 3"
     assert s.inputs() == []
     for _ in range(50):  # 回應被讀走後，下一幀才會移除保留的腳本
         if not (ui.root / "add.sh").exists():
@@ -138,31 +138,30 @@ def test_multiplayer_blocks_until_everyone_ready(tmp_path):
 
     ok, text = s1.input("ready", timeout=10)
     t.join(timeout=10)
-    assert ok and "開始了" in text and "./play.sh" in text
+    assert ok and "開始了" in text and s1.inputs() == ["play"]
     ok, text = result["r"]
     assert ok and "開始了" in text
 
     for s in (s0, s1):
         ok, text = s.input("play", timeout=10)
-        assert ok and "已結束" in text and "開始了" not in text  # 已經看過的訊息不會重複
+        assert ok and text == "played"  # 已經看過的訊息不會重複
     for th in threads:
         th.join(timeout=10)
         assert not th.is_alive()
 
 
-def test_timeout_and_resume(tmp_path):
+def test_interrupted_and_resume(tmp_path):
     lobby, threads, (s0, s1) = make_lobby(tmp_path)
     script = str(lobby.uis[0].root / "ready.sh")
-    env = {**os.environ, "FOLDERUI_TIMEOUT": "1"}
 
-    r = subprocess.run([script], capture_output=True, text=True, timeout=10, env=env)
-    assert r.returncode == 2  # 逾時，但請求已送出
+    with pytest.raises(subprocess.TimeoutExpired):  # 模擬 agent 的指令逾時被砍掉，但請求已送出
+        subprocess.run([script], capture_output=True, text=True, timeout=1)
 
-    r = subprocess.run([script, "other"], capture_output=True, text=True, timeout=10, env=env)
+    r = subprocess.run([script, "other"], capture_output=True, text=True, timeout=10)
     assert r.returncode == 1 and "還在等待" in r.stdout  # 不同的指令會被拒絕
 
     s1.input("ready", timeout=10)
-    r = subprocess.run([script], capture_output=True, text=True, timeout=10, env=env)
+    r = subprocess.run([script], capture_output=True, text=True, timeout=10)
     assert r.returncode == 0 and "開始了" in r.stdout  # 同樣的指令 → 拿到回應
     for ui in lobby.uis:
         ui.close()

@@ -3,11 +3,11 @@
 子類別實作：
     draw()                 每一幀重新宣告畫面，不可修改狀態：file()、input()、close()
     action(name, args)     按鈕被按下時呼叫：回傳文字，或 raise 代表失敗
-    display(result)        （可選）回應時呼叫一次，決定回應的內容；預設直接回傳 result
+    display(result)        （可選）回應時呼叫一次，回傳值就是回應的內容；預設直接回傳 result
 
 資料夾裡只有 draw() 宣告的檔案和按鈕腳本（<path>.sh）。執行按鈕腳本後，腳本會一直等待，
-直到「操作處理完之後，第一個有按鈕可按的畫面」出現（或 close()）才回應：
-    display(action 的回傳值或錯誤訊息) + 目前可按的按鈕
+直到「操作處理完之後，第一個有按鈕可按的畫面」出現（或 close()）才印出 display(result) 並結束。
+result 是 action 的回傳值或錯誤訊息；exit code 0 代表成功，1 代表失敗。
 
 狀態被其他執行緒改變時（例如其他玩家的操作），呼叫 refresh() 讓這個 UI 重畫。
 
@@ -35,30 +35,20 @@ SCRIPT = """\
 # folderui 按鈕：{name}
 cd {root} || exit 1
 printf '%s\\0' {qname} "$@" > .request.new
-if [ -e .request ]; then
-  if cmp -s .request .request.new; then
-    rm -f .request.new
-    echo "⏳ 繼續等待…" >&2
-  else
+if [ -e .request ]; then  # 上次被中斷（例如 agent 的指令逾時）：同樣的指令＝繼續等待
+  if ! cmp -s .request .request.new; then
     rm -f .request.new
     echo "❌ 上一個操作還在等待回應；再執行一次同樣的指令可以繼續等待"
     exit 1
   fi
-elif [ -e .done ] && cmp -s .done .request.new; then
+  rm -f .request.new
+elif [ -e .done ] && cmp -s .done .request.new; then  # 回應已經好了但還沒讀
   rm -f .request.new
 else
   rm -f .done .response
   mv .request.new .request
-  echo "⏳ 已送出，等待中…" >&2
 fi
-limit=$(( ${{FOLDERUI_TIMEOUT:-0}} * 5 )); i=0
-while [ -e .request ]; do
-  sleep 0.2; i=$((i+1))
-  if [ "$limit" -gt 0 ] && [ "$i" -ge "$limit" ]; then
-    echo "⏳ 還在等待中，再執行一次同樣的指令即可繼續等待"
-    exit 2
-  fi
-done
+while [ -e .request ]; do sleep 0.2; done
 code=$(head -n 1 .response)
 tail -n +2 .response
 rm -f .done
@@ -99,8 +89,13 @@ class FolderUI:
 
     def display(self, result: str) -> str:
         """回應時呼叫一次（所以可以在這裡記錄「已經給這個人看到哪裡」）。
-        result 是 action 的回傳值或錯誤訊息；回傳值會成為回應的內容，後面再附上可按的按鈕。"""
+        result 是 action 的回傳值或錯誤訊息；回傳值就是回應的內容。self.inputs 是目前可按的按鈕。"""
         return result
+
+    @property
+    def inputs(self) -> list[str]:
+        """目前可按的按鈕路徑（最近一幀 draw() 宣告的）。"""
+        return list(self._inputs)
 
     # ---- 在 draw() 中呼叫 ----
 
@@ -181,12 +176,8 @@ class FolderUI:
             print(f"[folderui:{self.root.name}] display() 發生錯誤：", file=sys.stderr)
             traceback.print_exc()
             text = result
-        parts = [text.strip("\n")] if text and text.strip() else []
-        if self.closed:
-            parts.append("── 已結束 ──")
-        else:
-            parts.append("── 可以做的事 ──\n" + "\n".join(f"./{p}.sh" for p in self._inputs))
-        write_text(self.root / ".response", f"{code}\n" + "\n\n".join(parts) + "\n")
+        text = (text or "").strip("\n")
+        write_text(self.root / ".response", f"{code}\n" + (text + "\n" if text else ""))
         os.replace(self.root / ".request", self.root / ".done")
         self._pending = None
 
