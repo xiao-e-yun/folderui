@@ -185,11 +185,11 @@ def test_concurrent_press_is_rejected_by_lock(counter):
     assert ok and text == "now 1"
 
 
-def test_exception_in_action_is_unavailable(counter):
+def test_exception_in_action_is_printed(counter):
     ui, s = counter
     ui.action = lambda name, args: 1 / 0
-    ok, text = s.input("add", "1", timeout=5)
-    assert not ok and text == "❌ Operation unavailable: the app failed to handle it"
+    ok, text = s.input("add", "1", timeout=5)  # the app's problem: delivered, the error is the response
+    assert ok and text == "ZeroDivisionError: division by zero"
     ui.action = Counter.action.__get__(ui)
     ok, text = s.input("add", "1", timeout=5)  # the UI keeps working
     assert ok and text == "now 1"

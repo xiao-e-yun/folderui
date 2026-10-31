@@ -56,8 +56,9 @@ Guess("/tmp/my-ui").run()
 The response is `display(result)`; without a `display()` it is just the action's return value. Like HTTP:
 
 - **exit 0** (200): the app answered. What the text says, including whether the action was accepted, is up to the app.
-- **exit 1** (4xx/5xx): `Operation unavailable`: another action is in flight, the button is no longer on screen,
-  or `action()` / `display()` raised (the traceback goes to the host's stderr).
+  If `action()` or `display()` raises, that is the app's problem: the error is printed as the response (the full
+  traceback goes to the host's stderr).
+- **exit 1** (4xx): `Operation unavailable`: another action is in flight, or the button is no longer on screen.
 
 The framework never appends a button list or a summary of screen changes: with a large screen (a Blender bridge,
 a map game) that is only noise, so `display()` decides what to tell the agent, e.g. "your turn, use ./bid.sh <amount>"

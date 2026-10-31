@@ -8,8 +8,9 @@ Subclasses implement:
 
 The folder contains only the files and button scripts (<path>.sh) declared by draw(). A button script
 blocks until the first frame after the action that has a button available (or close()), then prints
-display(result) and exits with code 0. Like HTTP, anything else (another action in flight, a button
-that is gone, an exception in action() or display()) prints "Operation unavailable" and exits with 1.
+display(result) and exits with code 0. If action() or display() raises, that is the app's problem: the
+error is printed instead, still with exit code 0. Exit code 1 ("Operation unavailable") is only for the
+framework failing to deliver the action (another action in flight, or a button that is gone).
 
 When another thread changes the state (e.g. another player's move), call refresh() to redraw this UI.
 
@@ -65,6 +66,10 @@ tail -n +2 .response
 rm -f .done
 exit "$code"
 """
+
+
+def _format_error(e: Exception) -> str:
+    return "".join(traceback.format_exception_only(type(e), e)).strip()
 
 
 def _check_path(path: str) -> str:
@@ -176,9 +181,9 @@ class FolderUI:
             return False
         try:
             result = self.action(name, args) or ""
-        except Exception:  # a bug in the app, like an HTTP 500
+        except Exception as e:  # the app's problem: show the error, still exit 0
             self._log_error("action")
-            self._write_response(1, "❌ Operation unavailable: the app failed to handle it")
+            self._write_response(0, _format_error(e))
             return True  # the state may have changed halfway, so redraw
         self._pending_input = name
         self._pending = result
@@ -186,10 +191,11 @@ class FolderUI:
 
     def _respond(self) -> None:
         try:
-            self._write_response(0, self.display(self._pending))
-        except Exception:
+            text = self.display(self._pending)
+        except Exception as e:
             self._log_error("display")
-            self._write_response(1, "❌ Operation unavailable: the app failed to handle it")
+            text = _format_error(e)
+        self._write_response(0, text)
         self._pending = None
 
     def _write_response(self, code: int, text: str | None) -> None:
