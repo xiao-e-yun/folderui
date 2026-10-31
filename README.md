@@ -149,6 +149,8 @@ while inputs := s.inputs():              # buttons available right now; empty me
 uv run python examples/guess.py                            # single player: guess the number
 uv run python examples/auction.py --players 4 --rounds 3   # multiplayer: English auction (players + spectator)
 uv run python examples/auction_bot.py <folder> bot0        # a random bot for the auction
+uv run python examples/frontier.py --players 3 --turns 12  # multiplayer: simultaneous-turn territory game with fog of war
+uv run python examples/frontier_bot.py <folder> bot0       # a random bot for Frontier
 ```
 
 ## Development
