@@ -1,11 +1,12 @@
 """Multiplayer example: Frontier, a simultaneous-turn (WeGo) territory game with fog of war.
 
-    uv run python examples/frontier.py [--players 3] [--turns 12] [--seed N] [--dir DIR]
+    uv run python examples/frontier.py [--players 3] [--size N] [--turns 12] [--seed N] [--dir DIR]
 
 Everyone gives orders to their units at the same time; when every player has pressed end_turn, the turn
 resolves at once. Each unit has its own buttons (units/<id>/move.sh), so the screen changes a lot every turn.
 """
 import argparse
+import math
 import random
 import tempfile
 import threading
@@ -14,10 +15,13 @@ from pathlib import Path
 
 from folderui import FolderUI
 
-SIZE = 10
+LETTERS = "ABCDEFGH"
 RECRUIT_COST = 2  # gold per point of strength
 DIRS = {"N": (0, -1), "S": (0, 1), "E": (1, 0), "W": (-1, 0)}
-CORNERS = [(1, 1), (8, 8), (8, 1), (1, 8)]
+
+
+def default_size(n):
+    return {2: 10, 3: 10, 4: 12, 5: 14, 6: 14}.get(n, 16)
 
 RULES = """# Frontier ({turns} turns)
 
@@ -27,7 +31,7 @@ pressed `./end_turn.sh`.
 ## The map (map.md)
 
 - `.` plains, `f` forest, `^` mountain (impassable), `?` not visible
-- `T` neutral town, `a`-`d` town owned by player A-D, `A`-`D` a unit of player A-D (strength in units.md)
+- `T` neutral town, `a`-`{last_lower}` town owned by player A-{last}, `A`-`{last}` a unit of that player (strength in units.md)
 - Coordinates are `x,y`: x grows to the east, y grows to the south.
 - Fog of war: you see only cells within 2 steps of your own units and towns.
 
@@ -64,18 +68,19 @@ class Unit:
 # ---------------- Game: pure logic, knows nothing about folders ----------------
 
 class Frontier:
-    def __init__(self, n, turns=12, seed=None):
+    def __init__(self, n, turns=12, seed=None, size=None):
         self.lock = threading.Lock()
         self.uis: list[FolderUI] = []
         self.events: list[tuple[set | None, str]] = []  # (recipients or None for everyone, text), append-only
         self.rng = random.Random(seed)
         self.n, self.turns, self.turn = n, turns, 0
+        self.size = size or default_size(n)
         self.names: list[str | None] = [None] * n
         self.gold = [3] * n
         self.alive = set(range(n))
         self.ended: set[int] = set()
         self.phase = "join"  # join -> orders -> over
-        self.capitals = {p: CORNERS[p] for p in range(n)}
+        self.capitals = self.place_capitals()
         self.towns: dict[tuple, int | None] = {c: p for p, c in self.capitals.items()}
         self.units: dict[int, Unit] = {}
         self.orders: dict[int, str] = {}       # unit id -> direction ("N"...); missing means hold
@@ -84,18 +89,29 @@ class Frontier:
         self.terrain = self.make_terrain()
         for p, (x, y) in self.capitals.items():
             self.spawn(p, x, y, 3)
-            self.spawn(p, x + (1 if x < SIZE // 2 else -1), y, 2)
+            c = (self.size - 1) / 2
+            dx, dy = (1 if x < c else -1, 0) if abs(x - c) >= abs(y - c) else (0, 1 if y < c else -1)
+            self.spawn(p, x + dx, y + dy, 2)  # the second unit starts one step toward the center
+
+    def place_capitals(self):
+        """Spread the capitals evenly on a ring around the center of the map."""
+        c, r = (self.size - 1) / 2, (self.size - 1) / 2 - 1
+        start = self.rng.random() * 2 * math.pi
+        return {p: (round(c + r * math.cos(start + 2 * math.pi * p / self.n)),
+                    round(c + r * math.sin(start + 2 * math.pi * p / self.n))) for p in range(self.n)}
 
     def make_terrain(self):
-        grid = [["." for _ in range(SIZE)] for _ in range(SIZE)]
-        reserved = {(x + dx, y + dy) for x, y in CORNERS for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
-        cells = [(x, y) for x in range(SIZE) for y in range(SIZE) if (x, y) not in reserved]
+        size = self.size
+        grid = [["." for _ in range(size)] for _ in range(size)]
+        reserved = {(x + dx, y + dy) for x, y in self.capitals.values() for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+        cells = [(x, y) for x in range(size) for y in range(size) if (x, y) not in reserved]
         self.rng.shuffle(cells)
-        for x, y in cells[:6]:
+        towns, forests, mountains = 2 * self.n, size * size * 14 // 100, size * size * 8 // 100
+        for x, y in cells[:towns]:
             self.towns[(x, y)] = None
-        for x, y in cells[6:20]:
+        for x, y in cells[towns:towns + forests]:
             grid[y][x] = "f"
-        for x, y in cells[20:28]:
+        for x, y in cells[towns + forests:towns + forests + mountains]:
             grid[y][x] = "^"
         return grid
 
@@ -104,7 +120,7 @@ class Frontier:
         self.next_id += 1
 
     def letter(self, p):
-        return "ABCD"[p]
+        return LETTERS[p]
 
     def name(self, p):
         return f"{self.names[p] or f'player_{p}'} ({self.letter(p)})"
@@ -154,7 +170,7 @@ class Frontier:
         if d not in DIRS:
             raise ValueError("direction must be N, S, E or W")
         x, y = u.x + DIRS[d][0], u.y + DIRS[d][1]
-        if not (0 <= x < SIZE and 0 <= y < SIZE) or self.terrain[y][x] == "^":
+        if not (0 <= x < self.size and 0 <= y < self.size) or self.terrain[y][x] == "^":
             raise ValueError(f"unit #{uid} cannot move {d} into {x},{y}")
         self.orders[uid] = d
         return f"Unit #{uid} will move {d} to {x},{y}."
@@ -199,8 +215,10 @@ class Frontier:
 
     def resolve(self):
         reports: dict[int, list[str]] = {p: [] for p in range(self.n)}
+        everything: list[str] = []  # each line once, for the spectator
 
         def report(cell, text, involved):
+            everything.append(text)
             for p in self.alive:
                 if p in involved or cell in self.visible(p):
                     reports[p].append(text)
@@ -275,6 +293,7 @@ class Frontier:
                 else:
                     self.spawn(p, town[0], town[1], n)
                 reports[p].append(f"Recruited strength {n} at {town[0]},{town[1]}.")
+                everything.append(f"{self.name(p)} recruited strength {n} at {town[0]},{town[1]}.")
         for town, p in self.towns.items():
             if p is not None:
                 self.gold[p] += 2 if town == self.capitals[p] else 1
@@ -287,6 +306,9 @@ class Frontier:
         for p, lines in reports.items():
             if lines:
                 self.say(f"Turn {self.turn} report:\n" + "\n".join(f"- {line}" for line in lines), to={p})
+        if everything:
+            self.say(f"Turn {self.turn} (all reports):\n" + "\n".join(f"- {line}" for line in everything),
+                     to={"spectator"})
         self.orders, self.recruits, self.ended = {}, {}, set()
         if self.turn >= self.turns or len(self.alive) <= 1:
             self.phase = "over"
@@ -299,19 +321,23 @@ class Frontier:
 
     def visible(self, p):
         if p == "spectator":
-            return {(x, y) for x in range(SIZE) for y in range(SIZE)}
+            return {(x, y) for x in range(self.size) for y in range(self.size)}
         eyes = [(u.x, u.y) for u in self.units.values() if u.owner == p]
         eyes += [t for t, o in self.towns.items() if o == p]
-        return {(x, y) for x in range(SIZE) for y in range(SIZE)
+        return {(x, y) for x in range(self.size) for y in range(self.size)
                 if any(abs(x - ex) + abs(y - ey) <= 2 for ex, ey in eyes)}
 
     def map_md(self, p):
         seen = self.visible(p)
         occupant = {(u.x, u.y): u.owner for u in self.units.values()}
-        rows = ["```", "   " + " ".join(str(x) for x in range(SIZE))]
-        for y in range(SIZE):
+        xs = range(self.size)
+        rows = ["```"]
+        if self.size > 10:  # two header rows: tens, then ones
+            rows.append("   " + " ".join(str(x // 10) if x >= 10 else " " for x in xs))
+        rows.append("   " + " ".join(str(x % 10) for x in xs))
+        for y in range(self.size):
             cells = []
-            for x in range(SIZE):
+            for x in xs:
                 c = (x, y)
                 if c not in seen:
                     cells.append("?")
@@ -369,7 +395,9 @@ class PlayerUI(FolderUI):
         with g.lock:
             if g.phase == "over" or (g.phase == "orders" and self.me not in g.alive):
                 self.close()
-            self.file("rules.md", RULES.format(turns=g.turns, letter=g.letter(self.me), cost=RECRUIT_COST))
+            last = LETTERS[g.n - 1]
+            self.file("rules.md", RULES.format(turns=g.turns, letter=g.letter(self.me), cost=RECRUIT_COST,
+                                               last=last, last_lower=last.lower()))
             if g.phase == "join":
                 if not g.names[self.me]:
                     self.input("join")
@@ -446,21 +474,23 @@ class SpectatorUI(FolderUI):
                 self.close()
             self.file("map.md", g.map_md("spectator"))
             self.file("units.md", g.units_md("spectator"))
-            self.file("log.md", "# Log\n\n" + "\n\n".join(e for _, e in g.events) + "\n")
+            public = [e for to, e in g.events if to is None or "spectator" in to]  # not each player's copy of a report
+            self.file("log.md", "# Log\n\n" + "\n\n".join(public) + "\n")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--players", type=int, default=3)
+    ap.add_argument("--size", type=int, help="map width and height (default depends on the player count)")
     ap.add_argument("--turns", type=int, default=12)
     ap.add_argument("--seed", type=int)
     ap.add_argument("--dir")
     args = ap.parse_args()
-    if not 2 <= args.players <= 4:
-        raise SystemExit("players must be between 2 and 4")
+    if not 2 <= args.players <= len(LETTERS):
+        raise SystemExit(f"players must be between 2 and {len(LETTERS)}")
     root = Path(args.dir or tempfile.mkdtemp(prefix="folderui-frontier-"))
 
-    game = Frontier(args.players, args.turns, args.seed)
+    game = Frontier(args.players, args.turns, args.seed, args.size)
     uis = {p: PlayerUI(root / f"player_{p}", game, p) for p in range(args.players)}
     uis["spectator"] = SpectatorUI(root / "spectator", game)
     game.uis = list(uis.values())
