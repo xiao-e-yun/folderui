@@ -28,17 +28,17 @@ class Session:
         return read_text(self.root / path, "")
 
     def input(self, path: str, *args: str, timeout: float | None = None) -> tuple[bool, str]:
-        """Press a button and wait for the response. Returns (delivered, response text).
-        delivered is False only when the framework could not deliver the action (e.g. the button is gone);
-        whether the app accepted it is up to the app's response text."""
+        """Press a button and wait for the response. Returns (ok, response text).
+        ok is False when the operation was unavailable (the button is gone, the app crashed, ...);
+        whether the app accepted the action is up to its response text."""
         lock, request = self.root / ".lock", self.root / ".request"
         try:
             lock.mkdir()
         except FileExistsError:
-            raise RuntimeError("another action is being submitted") from None
+            raise RuntimeError("operation unavailable: another action is being submitted") from None
         try:
             if request.exists():
-                raise RuntimeError("the previous action is still waiting for a response")
+                raise RuntimeError("operation unavailable: the previous action is still waiting")
             (self.root / ".done").unlink(missing_ok=True)
             write_text(request, "".join(f"{x}\0" for x in (path, *args)))
         finally:

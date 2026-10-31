@@ -319,8 +319,8 @@ class PlayerUI(FolderUI):
     def action(self, name, args):
         try:
             return self.move(name, " ".join(args).strip())
-        except ValueError as e:
-            raise ValueError(f"❌ {e}") from None
+        except ValueError as e:  # the game rejected the move: tell the player
+            return f"❌ {e}"
 
     def move(self, name, text):
         if name == "pass":

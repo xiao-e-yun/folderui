@@ -2,15 +2,14 @@
 
 Subclasses implement:
     draw()                 Re-declare the whole screen every frame; must not change state: file(), input(), close()
-    action(name, args)     Called when a button is pressed: return text, or raise to reject it
+    action(name, args)     Called when a button is pressed: return text (a rejection is just text, too)
     display(result)        (optional) Called once per response; its return value is the response text.
                            Defaults to returning result unchanged.
 
 The folder contains only the files and button scripts (<path>.sh) declared by draw(). A button script
 blocks until the first frame after the action that has a button available (or close()), then prints
-display(result) and exits. result is the action's return value, or the message of the exception it
-raised. The exit code is 0 whenever the app answered (even if it rejected the action); 1 means the
-framework could not deliver the action (another action is in flight, or the button is gone).
+display(result) and exits with code 0. Like HTTP, anything else (another action in flight, a button
+that is gone, an exception in action() or display()) prints "Operation unavailable" and exits with 1.
 
 When another thread changes the state (e.g. another player's move), call refresh() to redraw this UI.
 
@@ -41,7 +40,7 @@ SCRIPT = """\
 # folderui button: {name}
 cd {root} || exit 1
 if ! mkdir .lock 2>/dev/null; then
-  echo "❌ Another action is being submitted; try again"
+  echo "❌ Operation unavailable: another action is being submitted"
   exit 1
 fi
 printf '%s\\0' {qname} "$@" > .request.new
@@ -49,7 +48,7 @@ if [ -e .request ]; then  # interrupted last time (e.g. the agent's command time
   if ! cmp -s .request .request.new; then
     rm -f .request.new
     rmdir .lock
-    echo "❌ The previous action is still waiting for a response; run the same command again to keep waiting"
+    echo "❌ Operation unavailable: the previous action is still waiting; run the same command again to keep waiting"
     exit 1
   fi
   rm -f .request.new
@@ -97,12 +96,11 @@ class FolderUI:
         pass
 
     def action(self, name: str, args: list[str]) -> str | None:
-        raise ValueError(f"no handler for button {name}")
+        raise NotImplementedError(f"no handler for button {name}")
 
     def display(self, result: str) -> str:
         """Called once per response (so it may record what this participant has already seen).
-        result is the action's return value or the message of the exception it raised; the return value
-        is the response text.
+        result is the action's return value; the return value is the response text.
         self.inputs lists the buttons available right now."""
         return result
 
@@ -174,27 +172,24 @@ class FolderUI:
             return False
         name, *args = [x.decode("utf-8", "replace") for x in raw.split(b"\0")[:-1]] or [""]
         if name not in self._inputs:  # the screen was redrawn as the script ran: a rendering race, answered here without action/display
-            self._write_response(1, f"❌ Button {name} is unavailable (the screen has changed)")
+            self._write_response(1, f"❌ Operation unavailable: {name} is not on screen")
             return False
-        self._pending_input = name
         try:
             result = self.action(name, args) or ""
-        except Exception as e:  # the app answered by rejecting: still exit code 0, message passed as-is
-            if not isinstance(e, ValueError):  # ValueError is a user error; anything else is a bug
-                traceback.print_exc()
-            result = str(e) or type(e).__name__
+        except Exception:  # a bug in the app, like an HTTP 500
+            self._log_error("action")
+            self._write_response(1, "❌ Operation unavailable: the app failed to handle it")
+            return True  # the state may have changed halfway, so redraw
+        self._pending_input = name
         self._pending = result
         return True
 
     def _respond(self) -> None:
-        result = self._pending
         try:
-            text = self.display(result)
+            self._write_response(0, self.display(self._pending))
         except Exception:
-            print(f"[folderui:{self.root.name}] error in display():", file=sys.stderr)
-            traceback.print_exc()
-            text = result
-        self._write_response(0, text)
+            self._log_error("display")
+            self._write_response(1, "❌ Operation unavailable: the app failed to handle it")
         self._pending = None
 
     def _write_response(self, code: int, text: str | None) -> None:
@@ -242,5 +237,8 @@ class FolderUI:
         try:
             fn(*args)
         except Exception:
-            print(f"[folderui:{self.root.name}] error in {fn.__name__}():", file=sys.stderr)
-            traceback.print_exc()
+            self._log_error(fn.__name__)
+
+    def _log_error(self, where: str) -> None:
+        print(f"[folderui:{self.root.name}] error in {where}():", file=sys.stderr)
+        traceback.print_exc()

@@ -34,11 +34,11 @@ class Guess(FolderUI):
         self.file("rules.md", "Guess 1-100 with ./guess.sh <number>")
         self.input("guess")
 
-    def action(self, name, args):        # a button was pressed: return text, or raise ValueError to reject it
+    def action(self, name, args):        # a button was pressed: return text (a rejection is just text, too)
         ...
         return "too high"
 
-    def display(self, result):           # optional: called once per response; result is the action's text or the error message
+    def display(self, result):           # optional: called once per response; result is the action's text
         return f"{result}\n\n{len(self.tries)} guesses so far"
 
 Guess("/tmp/my-ui").run()
@@ -53,11 +53,12 @@ Guess("/tmp/my-ui").run()
 | `run(background=False)` | | Run the main loop; with `background=True`, run it in a thread and return the thread |
 | `inputs` | `display()` | Read-only list of the buttons available right now |
 
-The response is `display(result)`; without a `display()` it is just the action's return value (or the message of the
-exception it raised, passed through as-is). Exit codes:
+The response is `display(result)`; without a `display()` it is just the action's return value. Like HTTP:
 
-- **0**: the app answered, whether it accepted or rejected the action. Put your own markers (e.g. `✅` / `❌`) in the text.
-- **1**: the framework could not deliver the action: another action is in flight, or the button is no longer on screen.
+- **exit 0** (200): the app answered. What the text says, including whether the action was accepted, is up to the app.
+- **exit 1** (4xx/5xx): `Operation unavailable`: another action is in flight, the button is no longer on screen,
+  or `action()` / `display()` raised (the traceback goes to the host's stderr).
+
 The framework never appends a button list or a summary of screen changes: with a large screen (a Blender bridge,
 a map game) that is only noise, so `display()` decides what to tell the agent, e.g. "your turn, use ./bid.sh <amount>"
 or "the screen changed, read shop.md".
@@ -75,7 +76,7 @@ def display(self, result):
 **There is only one response rule**: after the action is handled, respond at the first frame that has a button
 available (or after `close()`).
 
-- Invalid input → state unchanged, buttons still there → respond immediately (the raised message)
+- Invalid input → state unchanged, buttons still there → respond immediately (the app's error text)
 - Queries → buttons still there → respond immediately
 - Waiting for others after acting → no buttons → wait until it's your turn
 
@@ -92,7 +93,7 @@ class Game:
 
     def bid(self, who, amount):
         with self.lock:
-            ...                          # pure logic; raise ValueError if the rules forbid it
+            ...                          # pure logic; return an error text if the rules forbid it
         for ui in self.uis:
             ui.refresh()                 # only marks "needs redraw"; never blocks
         return "✅ You bid"
@@ -134,10 +135,8 @@ while inputs := s.inputs():              # buttons available right now; empty me
   request has already been sent: **run the same command again to keep waiting or get the response** (it is not
   sent twice); running a different button is rejected (exit code 1). The button's script is kept until its
   response has been read.
-- If a response was never read and a *different* button is pressed, the unread response is dropped. What the
-  participant has "seen" is the app's business (e.g. a cursor advanced in `display()`).
 - Pressing a button that is no longer on screen (the screen was redrawn just as the script ran) gets an immediate
-  "unavailable" response from the framework (exit code 1), without calling `action()` or `display()`.
+  "Operation unavailable" response from the framework (exit code 1), without calling `action()` or `display()`.
 - Concurrent presses in the same folder are serialized by a `.lock` directory; a press that finds it held is
   rejected (exit code 1).
 - Protocol files are hidden: `.request`, `.response`, `.done`, `.lock`, `.state.json`.

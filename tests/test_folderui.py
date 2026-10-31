@@ -21,7 +21,7 @@ class Counter(FolderUI):
 
     def action(self, name, args):
         if args != ["1"]:
-            raise ValueError("can only add 1")
+            return "can only add 1"
         self.n += 1
         if self.n == 3:
             self.close()
@@ -43,7 +43,7 @@ def test_session_press(counter):
     ui, s = counter
     assert s.inputs() == ["add"]
     ok, text = s.input("add", "2", timeout=5)
-    assert ok and text == "can only add 1"  # the app rejected it, but it was delivered
+    assert ok and text == "can only add 1"  # a rejection is just the app's text
     ok, text = s.input("add", "1", timeout=5)
     assert ok and text == "now 1"
     assert s.read("count.md") == "1\n"
@@ -179,7 +179,17 @@ def test_concurrent_press_is_rejected_by_lock(counter):
     ui, s = counter
     (ui.root / ".lock").mkdir()  # another script is in the middle of submitting
     r = subprocess.run([str(ui.root / "add.sh"), "1"], capture_output=True, text=True, timeout=10)
-    assert r.returncode == 1 and "Another action" in r.stdout
+    assert r.returncode == 1 and "another action" in r.stdout
     (ui.root / ".lock").rmdir()
     ok, text = s.input("add", "1", timeout=5)
+    assert ok and text == "now 1"
+
+
+def test_exception_in_action_is_unavailable(counter):
+    ui, s = counter
+    ui.action = lambda name, args: 1 / 0
+    ok, text = s.input("add", "1", timeout=5)
+    assert not ok and text == "❌ Operation unavailable: the app failed to handle it"
+    ui.action = Counter.action.__get__(ui)
+    ok, text = s.input("add", "1", timeout=5)  # the UI keeps working
     assert ok and text == "now 1"
