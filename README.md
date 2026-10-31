@@ -5,7 +5,7 @@
 - `*.md` 等檔案：畫面（隨時可以 `cat`）
 - `*.sh`：按鈕（只有現在能按的才會出現）
 
-執行按鈕後，腳本會**一直等到你需要做下一個決定**才回應，並印出：操作結果 + 這段期間發生的事 + 目前狀況 + 可以按的按鈕。
+執行按鈕後，腳本會**一直等到你需要做下一個決定**才回應，並印出應用程式決定的內容（例如操作結果、這段期間發生的事、目前狀況）+ 可以按的按鈕。
 所以 agent 的迴圈就是「執行按鈕 → 讀回應 → 執行下一個按鈕」，不需要另外等待或輪詢。
 
 ```sh
@@ -16,33 +16,33 @@ pip install folderui     # 或 uv add folderui；只用標準函式庫，需要 
 $ ./bid.sh 40
 ⏳ 已送出，等待中…              ← 其他人還在喊價，腳本卡住
 ✅ 已出價 40
-📣 bob 45（目前最高：bob 45）    ← 這段期間發生的事（log）
+📣 bob 45（目前最高：bob 45）    ← 以上由 display() 決定
 📣 carol 退出
-輪到你喊價，目前最高 bob 45     ← 目前狀況（status）
+輪到你喊價，目前最高 bob 45
 
-── 可以做的事 ──
-./bid.sh  <金額 50-100>  公開喊價
-./pass.sh  退出這件拍品
+── 可以做的事 ──               ← 框架附上目前可按的按鈕
+./bid.sh
+./pass.sh
 ```
 
 ## 寫一個 UI
 
-子類別只要實作兩個方法：`draw()` 宣告畫面，`action()` 處理按鈕。
+子類別實作 `draw()` 宣告畫面、`action()` 處理按鈕，可選的 `display()` 決定回應的內容。
 
 ```python
 from folderui import FolderUI
 
 class Guess(FolderUI):
     def draw(self):                      # 每一幀重新宣告畫面，不可修改狀態
-        self.file("rules.md", "猜 1-100")
-        for n, result in self.tries:
-            self.log(f"{n}：{result}")   # 回應時只附上還沒送出過的
-        self.input("guess", "<數字>")
-        self.status(f"已經猜了 {len(self.tries)} 次")
+        self.file("rules.md", "猜 1-100，用 ./guess.sh <數字>")
+        self.input("guess")
 
     def action(self, name, args):        # 按鈕被按下：回傳文字，或 raise ValueError 代表失敗
         ...
         return "太大"
+
+    def display(self, result):           # 可選：回應時呼叫一次，result 是 action 的回傳值或錯誤訊息
+        return f"{result}\n\n已經猜了 {len(self.tries)} 次"
 
 Guess("/tmp/my-ui").run()
 ```
@@ -50,12 +50,20 @@ Guess("/tmp/my-ui").run()
 | 方法 | 在哪裡呼叫 | 作用 |
 |---|---|---|
 | `file(path, content)` | `draw()` | 宣告一個檔案；沒宣告的會自動刪除 |
-| `input(path, hint, options=None)` | `draw()` | 宣告一個按鈕 → `<path>.sh`，路徑可以分層（`players/2/kick`） |
-| `log(content)` | `draw()` | 宣告一則訊息；每一幀都宣告完整的序列，回應時只附上還沒送出過的 |
-| `status(text)` | `draw()` | 目前狀況：附在每次回應的最後（是回應那一刻的狀態，不是對操作的回覆） |
+| `input(path)` | `draw()` | 宣告一個按鈕 → `<path>.sh`，路徑可以分層（`players/2/kick`）；用法寫在你的 `.md` 裡 |
 | `close()` | `draw()` 或任何地方 | 結束：移除按鈕、回應等待中的腳本，`run()` 返回 |
 | `refresh()` | 任何執行緒 | 狀態被別人改變了：讓這個 UI 重畫（不會等待） |
 | `run(background=False)` | | 執行主迴圈；`background=True` 時在背景執行緒執行並回傳該執行緒 |
+
+回應 = `display(result)` + 目前可按的按鈕（或「已結束」）。沒有實作 `display()` 時就是 action 的回傳值。
+`display()` 每次回應只呼叫一次，所以可以在裡面記錄「已經給這個人看到哪裡」，只附上新的訊息：
+
+```python
+def display(self, result):
+    with self.game.lock:
+        new, self.seen = self.game.events[self.seen:], len(self.game.events)
+    return "\n".join([result, *new, "輪到你了"])
+```
 
 **回應規則只有一條**：操作處理完之後，第一個「有按鈕可按」的畫面出現時（或 `close()`）才回應。
 
@@ -106,8 +114,8 @@ for t in [ui.run(background=True) for ui in game.uis]:
 from folderui import Session
 s = Session("/tmp/folderui-auction-xxxx/player_0")
 s.ready()
-print(s.status())                        # 第一次進來還沒有回應，可以從這裡讀目前狀況
-while inputs := s.inputs():              # {路徑: {hint, options}}，空的代表結束
+print(s.read("rules.md"))
+while inputs := s.inputs():              # 目前可按的按鈕路徑，空的代表結束
     ok, text = s.input("bid", "40")
 ```
 

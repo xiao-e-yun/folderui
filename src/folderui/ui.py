@@ -1,12 +1,13 @@
 """FolderUI：把一個資料夾變成給人類或 AI agent 用的立即式 GUI。
 
-子類別實作兩個方法：
-    draw()                 每一幀重新宣告畫面，不可修改狀態：file()、input()、log()、status()、close()
+子類別實作：
+    draw()                 每一幀重新宣告畫面，不可修改狀態：file()、input()、close()
     action(name, args)     按鈕被按下時呼叫：回傳文字，或 raise 代表失敗
+    display(result)        （可選）回應時呼叫一次，決定回應的內容；預設直接回傳 result
 
 資料夾裡只有 draw() 宣告的檔案和按鈕腳本（<path>.sh）。執行按鈕腳本後，腳本會一直等待，
 直到「操作處理完之後，第一個有按鈕可按的畫面」出現（或 close()）才回應：
-    action 的回傳值 + 還沒看過的 log() + status() + 目前可按的按鈕
+    display(action 的回傳值或錯誤訊息) + 目前可按的按鈕
 
 狀態被其他執行緒改變時（例如其他玩家的操作），呼叫 refresh() 讓這個 UI 重畫。
 
@@ -14,7 +15,7 @@
     .request     腳本寫入：按鈕路徑與參數，以 NUL 分隔
     .response    主機寫入：第一行為 exit code，之後為回應內容
     .done        主機回應後把 .request 改名為 .done；腳本讀完回應後刪除它
-    .state.json  目前的 status 與按鈕列表（給 Session 用）
+    .state.json  目前可按的按鈕（給 Session 用）
 """
 import json
 import os
@@ -31,7 +32,7 @@ PROTOCOL_FILES = (".request", ".request.new", ".response", ".done")
 
 SCRIPT = """\
 #!/bin/sh
-# folderui 按鈕：{name}{hint}
+# folderui 按鈕：{name}
 cd {root} || exit 1
 printf '%s\\0' {qname} "$@" > .request.new
 if [ -e .request ]; then
@@ -82,14 +83,11 @@ class FolderUI:
         self.closed = False
         self._dirty = threading.Event()
         self._files: dict[str, str] = {}
-        self._inputs: dict[str, tuple[str, list[str] | None]] = {}
-        self._log: list[str] = []
-        self._status = ""
-        self._seen = 0                              # 上次回應時已經送出幾則 log
+        self._inputs: list[str] = []
         self._disk_files: dict[str, str] = {}      # 磁碟上由本框架管理的檔案
         self._disk_scripts: dict[str, str] = {}
         self._pending: tuple[int, str] | None = None
-        self._pending_input: tuple[str, str] | None = None  # (路徑, hint)：回應被讀走前保留它的腳本
+        self._pending_input: str | None = None  # 回應被讀走前保留這個按鈕的腳本
 
     # ---- 子類別實作 ----
 
@@ -99,22 +97,20 @@ class FolderUI:
     def action(self, name: str, args: list[str]) -> str | None:
         raise ValueError(f"沒有處理按鈕 {name}")
 
+    def display(self, result: str) -> str:
+        """回應時呼叫一次（所以可以在這裡記錄「已經給這個人看到哪裡」）。
+        result 是 action 的回傳值或錯誤訊息；回傳值會成為回應的內容，後面再附上可按的按鈕。"""
+        return result
+
     # ---- 在 draw() 中呼叫 ----
 
     def file(self, path: str, content: str) -> None:
         self._files[_check_path(path)] = content
 
-    def input(self, path: str, hint: str = "", options: list[str] | None = None) -> None:
+    def input(self, path: str) -> None:
         """宣告一個按鈕 → <path>.sh"""
-        self._inputs[_check_path(path)] = (hint, options)
-
-    def log(self, content: str) -> None:
-        """宣告一則訊息。每一幀都宣告完整的訊息序列，回應時只附上還沒送出過的。"""
-        self._log.append(content)
-
-    def status(self, text: str) -> None:
-        """目前狀況：每次回應時附在最後，也寫進 .state.json。"""
-        self._status = text
+        if (path := _check_path(path)) not in self._inputs:
+            self._inputs.append(path)
 
     def close(self) -> None:
         """結束：移除所有按鈕，回應正在等待的腳本，然後 run() 返回。"""
@@ -167,7 +163,7 @@ class FolderUI:
         if name not in self._inputs:
             self._pending = (1, f"❌ 按鈕 {name} 已經不存在")
             return True
-        self._pending_input = (name, self._inputs[name][0])
+        self._pending_input = name
         try:
             result = self.action(name, args)
             self._pending = (0, result or "")
@@ -178,40 +174,33 @@ class FolderUI:
         return True
 
     def _respond(self) -> None:
-        code, text = self._pending
-        parts = [text] if text else []
-        parts += self._log[min(self._seen, len(self._log)):]
-        self._seen = len(self._log)
-        if self._status:
-            parts.append(self._status)
+        code, result = self._pending
+        try:
+            text = self.display(result)
+        except Exception:
+            print(f"[folderui:{self.root.name}] display() 發生錯誤：", file=sys.stderr)
+            traceback.print_exc()
+            text = result
+        parts = [text.strip("\n")] if text and text.strip() else []
         if self.closed:
             parts.append("── 已結束 ──")
         else:
-            lines = ["── 可以做的事 ──"]
-            for path, (hint, options) in self._inputs.items():
-                lines.append(f"./{path}.sh" + (f"  {hint}" if hint else ""))
-                if options:
-                    lines.append("    選項：" + " / ".join(options))
-            parts.append("\n".join(lines))
+            parts.append("── 可以做的事 ──\n" + "\n".join(f"./{p}.sh" for p in self._inputs))
         write_text(self.root / ".response", f"{code}\n" + "\n\n".join(parts) + "\n")
         os.replace(self.root / ".request", self.root / ".done")
         self._pending = None
 
     def _redraw(self) -> None:
-        self._files, self._inputs, self._log, self._status = {}, {}, [], ""
+        self._files, self._inputs = {}, []
         self._call(self.draw)
         if self.closed:
-            self._inputs = {}
-        scripts = {f"{p}.sh": self._script(p, hint) for p, (hint, _) in self._inputs.items()}
+            self._inputs = []
+        scripts = {f"{p}.sh": self._script(p) for p in self._inputs}
         if self._pending_input:  # 逾時後重新執行同一個指令＝繼續等待或拿回應，所以腳本要留到回應被讀走
-            name, hint = self._pending_input
-            scripts.setdefault(f"{name}.sh", self._script(name, hint))
+            scripts.setdefault(f"{self._pending_input}.sh", self._script(self._pending_input))
         self._sync(self._disk_files, self._files, None)
         self._sync(self._disk_scripts, scripts, 0o755)
-        write_text(self.root / ".state.json", json.dumps({
-            "status": self._status,
-            "inputs": {p: {"hint": h, "options": o} for p, (h, o) in self._inputs.items()},
-        }, ensure_ascii=False, indent=2) + "\n")
+        write_text(self.root / ".state.json", json.dumps({"inputs": self._inputs}, ensure_ascii=False) + "\n")
 
     def _sync(self, disk: dict[str, str], want: dict[str, str], mode: int | None) -> None:
         for path in set(disk) - set(want):
@@ -234,10 +223,8 @@ class FolderUI:
             except OSError:
                 return
 
-    def _script(self, name: str, hint: str) -> str:
-        hint = " ".join(hint.split())
-        return SCRIPT.format(name=name, hint=f" — {hint}" if hint else "",
-                             root=shlex.quote(str(self.root)), qname=shlex.quote(name))
+    def _script(self, name: str) -> str:
+        return SCRIPT.format(name=name, root=shlex.quote(str(self.root)), qname=shlex.quote(name))
 
     def _call(self, fn, *args) -> None:
         try:

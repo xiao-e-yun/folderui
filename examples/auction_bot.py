@@ -1,5 +1,6 @@
 """拍賣用的隨機 bot（程式型 agent 範例）：python examples/auction_bot.py <資料夾> <名字>"""
 import random
+import re
 import sys
 
 from folderui import Session
@@ -15,8 +16,8 @@ def main(path, name):
             ok, _ = s.input("join", name)
             if not ok:  # 名字被用走了
                 name += "'"
-        elif "pick" in inputs:
-            s.input("pick", rng.choice(inputs["pick"]["options"]))
+        elif "pick" in inputs:  # hand.md 裡的 **名稱** 就是選項
+            s.input("pick", rng.choice(re.findall(r"\*\*(.+?)\*\*", s.read("hand.md"))))
         elif "describe" in inputs:
             s.input("describe", rng.choice(PITCHES))
         elif "bid" in inputs and rng.random() < 0.6:

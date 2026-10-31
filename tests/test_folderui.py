@@ -17,8 +17,7 @@ class Counter(FolderUI):
 
     def draw(self):
         self.file("count.md", f"{self.n}\n")
-        self.input("add", "<1-3>")
-        self.status(f"目前 {self.n}")
+        self.input("add")
 
     def action(self, name, args):
         if args != ["1"]:
@@ -42,8 +41,7 @@ def counter(tmp_path):
 
 def test_session_press(counter):
     ui, s = counter
-    assert set(s.inputs()) == {"add"}
-    assert s.status() == "目前 0"
+    assert s.inputs() == ["add"]
     ok, text = s.input("add", "2", timeout=5)
     assert not ok and "只能加 1" in text
     ok, text = s.input("add", "1", timeout=5)
@@ -56,7 +54,7 @@ def test_close_removes_buttons(counter):
     for _ in range(3):
         ok, text = s.input("add", "1", timeout=5)
     assert ok and "已結束" in text
-    assert s.inputs() == {}
+    assert s.inputs() == []
     for _ in range(50):  # 回應被讀走後，下一幀才會移除保留的腳本
         if not (ui.root / "add.sh").exists():
             break
@@ -95,13 +93,11 @@ class LobbyUI(FolderUI):
     def __init__(self, path, lobby, me):
         super().__init__(path)
         self.lobby, self.me, self.played = lobby, me, False
+        self.seen = 0
 
     def draw(self):
         with self.lobby.lock:
             ready, started = self.me in self.lobby.ready, len(self.lobby.ready) == len(self.lobby.uis)
-            events = list(self.lobby.events)
-        for e in events:
-            self.log(e)
         if self.played:
             self.close()
         elif not ready:
@@ -109,6 +105,11 @@ class LobbyUI(FolderUI):
         elif started:
             self.input("play")
         # 已準備但還沒開始 → 沒有按鈕 → 腳本繼續等
+
+    def display(self, result):  # 每次回應呼叫一次 → 只附上還沒看過的訊息
+        with self.lobby.lock:
+            new, self.seen = self.lobby.events[self.seen:], len(self.lobby.events)
+        return "\n".join([result, *new])
 
     def action(self, name, args):
         if name == "ready":
@@ -143,7 +144,7 @@ def test_multiplayer_blocks_until_everyone_ready(tmp_path):
 
     for s in (s0, s1):
         ok, text = s.input("play", timeout=10)
-        assert ok and "已結束" in text and "開始了" not in text  # log 只送出還沒看過的
+        assert ok and "已結束" in text and "開始了" not in text  # 已經看過的訊息不會重複
     for th in threads:
         th.join(timeout=10)
         assert not th.is_alive()

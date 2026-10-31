@@ -20,16 +20,9 @@ class Session:
             time.sleep(self.poll)
         return True
 
-    def state(self) -> dict:
-        return json.loads(read_text(self.root / ".state.json", "{}") or "{}")
-
-    def status(self) -> str:
-        """目前狀況（draw() 裡 status() 宣告的文字）。"""
-        return self.state().get("status", "")
-
-    def inputs(self) -> dict[str, dict]:
-        """目前可按的按鈕 {路徑: {hint, options}}；空的代表已結束（或還輪不到你）。"""
-        return self.state().get("inputs", {})
+    def inputs(self) -> list[str]:
+        """目前可按的按鈕路徑；空的代表已結束（或還輪不到你）。"""
+        return json.loads(read_text(self.root / ".state.json", "{}") or "{}").get("inputs", [])
 
     def read(self, path: str) -> str:
         return read_text(self.root / path, "")

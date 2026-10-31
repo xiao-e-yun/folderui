@@ -30,6 +30,14 @@ RULES = """# 拍賣（共 {rounds} 輪）
    第一口至少 1，之後每次至少比目前最高價多 {step}。只剩最高出價者時得標，付錢給賣家。
 4. 每場結束後公開寶物的詞條和真實價值，所有紀錄都在 history.md。
 5. 起始每人 100 金。總分 = 金錢 + 擁有寶物的真實價值，最高者獲勝。
+
+## 操作（只有現在能做的才會出現）
+
+- `./join.sh <名字>`：加入遊戲
+- `./pick.sh <寶物名稱>`：選這輪的拍品，寶物見 hand.md
+- `./describe.sh <介紹文字>`：當賣家時寫介紹，買家只看得到名稱和這段介紹
+- `./bid.sh <金額>`：輪到你時公開喊價
+- `./pass.sh`：退出這件拍品
 """
 
 
@@ -249,13 +257,11 @@ class PlayerUI(FolderUI):
     def __init__(self, path, game, me):
         super().__init__(path)
         self.game, self.me = game, me
+        self.seen = 0  # 已經在回應裡給這個玩家看過幾則訊息
 
     def draw(self):
         with self.game.lock:
             v = self.game.view(self.me)
-            events = list(self.game.events)
-        for e in events:
-            self.log(e)
         if v["phase"] == "over":
             self.close()
         self.file("rules.md", RULES.format(rounds=v["rounds"], step=STEP))
@@ -273,21 +279,30 @@ class PlayerUI(FolderUI):
                       + (f"> {v['pitch']}\n\n{v['bidding']}\n" if v["pitch"] else "（賣家正在寫介紹…）\n"))
 
         todo = v["todo"]
-        if todo == "join":
-            self.input("join", "<名字>")
-            self.status("請輸入名字加入遊戲（規則見 rules.md）。")
-        elif todo == "pick":
-            self.input("pick", "<寶物名稱>，詳見 hand.md", options=v["options"])
-            self.status(f"第 {v['round']}/{v['rounds']} 輪：選一件寶物拿去拍賣，其餘兩件丟棄。")
-        elif todo == "describe":
-            self.input("describe", "<介紹文字>（買家只看得到名稱和這段介紹）")
-            self.status(f"輪到你當賣家：\n{v['my_lot']}")
+        if todo in ("join", "pick", "describe"):
+            self.input(todo)
         elif todo == "bid":
             if v["min_bid"] <= v["money"]:
-                self.input("bid", f"<金額 {v['min_bid']}-{v['money']}>  公開喊價")
-            self.input("pass", "退出這件拍品")
-            self.status(f"輪到你喊價。{v['seller']} 正在拍賣「{v['lot_name']}」：\n> {v['pitch']}\n\n"
-                       f"{v['bidding']}\n\n你有 💰 {v['money']}。")
+                self.input("bid")
+            self.input("pass")
+
+    def display(self, result):
+        with self.game.lock:
+            v = self.game.view(self.me)
+            new, self.seen = self.game.events[self.seen:], len(self.game.events)
+        todo = v["todo"]
+        if todo == "join":
+            now = "請輸入名字加入遊戲（規則見 rules.md）。"
+        elif todo == "pick":
+            now = f"第 {v['round']}/{v['rounds']} 輪：選一件寶物拿去拍賣，其餘兩件丟棄。選項：" + " / ".join(v["options"])
+        elif todo == "describe":
+            now = f"輪到你當賣家：\n{v['my_lot']}"
+        elif todo == "bid":
+            now = (f"輪到你喊價。{v['seller']} 正在拍賣「{v['lot_name']}」：\n> {v['pitch']}\n\n"
+                   f"{v['bidding']}\n\n你有 💰 {v['money']}，這次至少要出 {v['min_bid']}。")
+        else:
+            now = ""
+        return "\n\n".join(x for x in [result, *new, now] if x)
 
     def action(self, name, args):
         text = " ".join(args).strip()
