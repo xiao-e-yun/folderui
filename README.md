@@ -151,6 +151,8 @@ uv run python examples/auction.py --players 4 --rounds 3   # multiplayer: Englis
 uv run python examples/auction_bot.py <folder> bot0        # a random bot for the auction
 uv run python examples/frontier.py --players 6 --turns 15  # multiplayer: simultaneous-turn territory game with fog of war (2-8 players)
 uv run python examples/frontier_bot.py <folder> bot0       # a random bot for Frontier
+uv run python examples/interrogation.py                    # asymmetric: one detective vs four suspects, fixed case file
+uv run python examples/interrogation_bot.py <folder>       # a random bot for any role
 ```
 
 ## Development
