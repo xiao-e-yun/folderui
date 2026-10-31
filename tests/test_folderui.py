@@ -172,14 +172,14 @@ def test_stale_input_is_rejected_without_calling_action(counter):
     calls = []
     ui.action = lambda name, args: calls.append(name)
     ok, text = s.input("gone", timeout=5)  # no such button on screen (e.g. a script from an old screen)
-    assert not ok and "unavailable" in text and calls == []
+    assert not ok and text == "Operation Unavailable\ngone is not on screen." and calls == []
 
 
 def test_concurrent_press_is_rejected_by_lock(counter):
     ui, s = counter
     (ui.root / ".lock").mkdir()  # another script is in the middle of submitting
     r = subprocess.run([str(ui.root / "add.sh"), "1"], capture_output=True, text=True, timeout=10)
-    assert r.returncode == 1 and "another action" in r.stdout
+    assert r.returncode == 1 and r.stdout == "Operation Unavailable\nAnother action is being submitted.\n"
     (ui.root / ".lock").rmdir()
     ok, text = s.input("add", "1", timeout=5)
     assert ok and text == "now 1"

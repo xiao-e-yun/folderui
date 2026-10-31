@@ -35,10 +35,10 @@ class Session:
         try:
             lock.mkdir()
         except FileExistsError:
-            raise RuntimeError("operation unavailable: another action is being submitted") from None
+            raise RuntimeError("Operation Unavailable: another action is being submitted.") from None
         try:
             if request.exists():
-                raise RuntimeError("operation unavailable: the previous action is still waiting")
+                raise RuntimeError("Operation Unavailable: the previous action is still waiting.")
             (self.root / ".done").unlink(missing_ok=True)
             write_text(request, "".join(f"{x}\0" for x in (path, *args)))
         finally:

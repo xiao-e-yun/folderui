@@ -9,7 +9,7 @@ Subclasses implement:
 The folder contains only the files and button scripts (<path>.sh) declared by draw(). A button script
 blocks until the first frame after the action that has a button available (or close()), then prints
 display(result) and exits with code 0. If action() or display() raises, that is the app's problem: the
-error is printed instead, still with exit code 0. Exit code 1 ("Operation unavailable") is only for the
+error is printed instead, still with exit code 0. Exit code 1 ("Operation Unavailable") is only for the
 framework failing to deliver the action (another action in flight, or a button that is gone).
 
 When another thread changes the state (e.g. another player's move), call refresh() to redraw this UI.
@@ -41,7 +41,8 @@ SCRIPT = """\
 # folderui button: {name}
 cd {root} || exit 1
 if ! mkdir .lock 2>/dev/null; then
-  echo "❌ Operation unavailable: another action is being submitted"
+  echo "Operation Unavailable"
+  echo "Another action is being submitted."
   exit 1
 fi
 printf '%s\\0' {qname} "$@" > .request.new
@@ -49,7 +50,8 @@ if [ -e .request ]; then  # interrupted last time (e.g. the agent's command time
   if ! cmp -s .request .request.new; then
     rm -f .request.new
     rmdir .lock
-    echo "❌ Operation unavailable: the previous action is still waiting; run the same command again to keep waiting"
+    echo "Operation Unavailable"
+    echo "The previous action is still waiting; run the same command again to keep waiting."
     exit 1
   fi
   rm -f .request.new
@@ -177,7 +179,7 @@ class FolderUI:
             return False
         name, *args = [x.decode("utf-8", "replace") for x in raw.split(b"\0")[:-1]] or [""]
         if name not in self._inputs:  # the screen was redrawn as the script ran: a rendering race, answered here without action/display
-            self._write_response(1, f"❌ Operation unavailable: {name} is not on screen")
+            self._write_response(1, f"Operation Unavailable\n{name} is not on screen.")
             return False
         try:
             result = self.action(name, args) or ""

@@ -58,7 +58,7 @@ The response is `display(result)`; without a `display()` it is just the action's
 - **exit 0** (200): the app answered. What the text says, including whether the action was accepted, is up to the app.
   If `action()` or `display()` raises, that is the app's problem: the error is printed as the response (the full
   traceback goes to the host's stderr).
-- **exit 1** (4xx): `Operation unavailable`: another action is in flight, or the button is no longer on screen.
+- **exit 1** (4xx): `Operation Unavailable` plus the reason: another action is in flight, or the button is no longer on screen.
 
 The framework never appends a button list or a summary of screen changes: with a large screen (a Blender bridge,
 a map game) that is only noise, so `display()` decides what to tell the agent, e.g. "your turn, use ./bid.sh <amount>"
@@ -137,7 +137,7 @@ while inputs := s.inputs():              # buttons available right now; empty me
   sent twice); running a different button is rejected (exit code 1). The button's script is kept until its
   response has been read.
 - Pressing a button that is no longer on screen (the screen was redrawn just as the script ran) gets an immediate
-  "Operation unavailable" response from the framework (exit code 1), without calling `action()` or `display()`.
+  "Operation Unavailable" response from the framework (exit code 1), without calling `action()` or `display()`.
 - Concurrent presses in the same folder are serialized by a `.lock` directory; a press that finds it held is
   rejected (exit code 1).
 - Protocol files are hidden: `.request`, `.response`, `.done`, `.lock`, `.state.json`.
