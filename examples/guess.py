@@ -1,4 +1,4 @@
-"""單人範例：猜數字。不需要伺服器，一個 FolderUI 就是整個應用。
+"""Single-player example: guess the number. No shared state needed; one FolderUI is the whole app.
 
     uv run python examples/guess.py [--dir DIR] [--seed N]
 """
@@ -16,26 +16,26 @@ class Guess(FolderUI):
         self.tries: list[tuple[int, str]] = []
 
     def draw(self):
-        self.file("rules.md", "# 猜數字\n\n我想了一個 1-100 的整數，用 `./guess.sh <數字>` 猜猜看。\n")
-        if self.tries:  # 只往後加 → 適合當紀錄
-            self.file("history.md", "".join(f"- {n}：{r}\n" for n, r in self.tries))
+        self.file("rules.md", "# Guess the number\n\nI picked an integer from 1 to 100. Guess it with `./guess.sh <number>`.\n")
+        if self.tries:  # append-only, so it works well as a log
+            self.file("history.md", "".join(f"- {n}: {r}\n" for n, r in self.tries))
         self.input("guess")
 
     def display(self, result):
         if self.closed:
             return result
-        return f"{result}\n\n已經猜了 {len(self.tries)} 次，用 ./guess.sh <數字> 繼續猜。"
+        return f"{result}\n\n{len(self.tries)} guesses so far. Keep going with ./guess.sh <number>."
 
     def action(self, name, args):
         if len(args) != 1 or not args[0].isdigit() or not 1 <= int(args[0]) <= 100:
-            raise ValueError("用法：./guess.sh <1-100 的整數>")
+            raise ValueError("usage: ./guess.sh <integer from 1 to 100>")
         n = int(args[0])
-        result = "🎉 答對了" if n == self.secret else ("太大" if n > self.secret else "太小")
+        result = "🎉 correct" if n == self.secret else ("too high" if n > self.secret else "too low")
         self.tries.append((n, result))
         if n == self.secret:
             self.close()
-            return f"🎉 答對了！答案是 {n}，共猜了 {len(self.tries)} 次"
-        return f"{n} {result}"
+            return f"🎉 Correct! The answer is {n}. You took {len(self.tries)} guesses."
+        return f"{n} is {result}"
 
 
 if __name__ == "__main__":

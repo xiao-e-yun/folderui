@@ -1,8 +1,10 @@
-"""多人範例：拍賣。一個共用的遊戲物件（純遊戲邏輯，用一把鎖保護）＋ N 個玩家 UI ＋ 1 個觀眾 UI。
+"""Multiplayer example: an auction. One shared game object (pure game logic, guarded by a lock)
+plus N player UIs and 1 spectator UI.
 
     uv run python examples/auction.py [--players 4] [--rounds 3] [--seed N] [--dir DIR]
 
-規則：每輪每人從 3 件寶物選 1 件拍賣；賣家寫介紹，買家只看得到名稱和介紹，輪流公開喊價。
+Rules: each round every player picks 1 of 3 treasures to sell; the seller writes a pitch, buyers see
+only the name and the pitch, then bid in turns in an open (English) auction.
 """
 import argparse
 import random
@@ -13,35 +15,38 @@ from pathlib import Path
 
 from folderui import FolderUI
 
-NAMES = ["龍紋古劍", "月光琉璃盞", "青銅羅盤", "鳳羽披風", "沉船金幣", "賢者手稿",
-         "翡翠面具", "星象儀", "黑曜石戒指", "古神雕像", "鍊金術士之瓶", "王冠碎片",
-         "水晶頭骨", "精靈豎琴", "海妖之淚", "隕鐵匕首", "藏寶圖", "不老藥"]
+NAMES = ["Dragon Sword", "Moonlight Chalice", "Bronze Compass", "Phoenix Cloak", "Shipwreck Coin",
+         "Sage's Manuscript", "Jade Mask", "Astrolabe", "Obsidian Ring", "Idol of the Old God",
+         "Alchemist's Flask", "Crown Shard", "Crystal Skull", "Elven Harp", "Siren's Tear",
+         "Meteorite Dagger", "Treasure Map", "Elixir of Youth"]
 
-TRAITS = [("皇室收藏", 30), ("名家之作", 25), ("古老", 20), ("鑲金", 15), ("完好無缺", 10),
-          ("稀有", 10), ("普通", 0), ("來路不明", -10), ("有裂痕", -15), ("被詛咒", -30),
-          ("贗品", -40)]
+TRAITS = [("royal collection", 30), ("masterwork", 25), ("ancient", 20), ("gilded", 15), ("flawless", 10),
+          ("rare", 10), ("ordinary", 0), ("dubious origin", -10), ("cracked", -15), ("cursed", -30),
+          ("forgery", -40)]
 
-RULES = """# 拍賣（共 {rounds} 輪）
+STEP = 5  # minimum raise
 
-1. 每輪開始時每人拿到 3 件新寶物，每件有底價和 2 個詞條（會加減價值），只有你自己看得到。
-   選 1 件當你這輪的拍品，其餘兩件丟棄。
-2. 每位玩家輪流當賣家，寫一段介紹。**買家只看得到寶物名稱和這段介紹**，可以誇大或隱瞞。
-3. 公開喊價：從賣家的下一位開始輪流，輪到你時可以加價或退出這件拍品（退出後不能再加入）。
-   第一口至少 1，之後每次至少比目前最高價多 {step}。只剩最高出價者時得標，付錢給賣家。
-4. 每場結束後公開寶物的詞條和真實價值，所有紀錄都在 history.md。
-5. 起始每人 100 金。總分 = 金錢 + 擁有寶物的真實價值，最高者獲勝。
+RULES = """# Auction ({rounds} rounds)
 
-## 操作（只有現在能做的才會出現）
+1. At the start of each round every player gets 3 new treasures. Each has a base price and 2 traits
+   that add to or subtract from its value; only you can see them. Pick 1 as this round's lot;
+   the other two are discarded.
+2. Players take turns as the seller and write a pitch. **Buyers see only the treasure's name and the
+   pitch**, which may exaggerate or leave things out.
+3. Open bidding: starting with the player after the seller, players take turns. On your turn you may
+   raise or drop out of this lot (you cannot rejoin). The first bid is at least 1; each raise must be at
+   least {step} above the current high bid. When only the high bidder is left, they win and pay the seller.
+4. After each lot, its traits and true value are revealed. The full record is in history.md.
+5. Everyone starts with 100 gold. Score = gold + true value of the treasures you own. Highest score wins.
 
-- `./join.sh <名字>`：加入遊戲
-- `./pick.sh <寶物名稱>`：選這輪的拍品，寶物見 hand.md
-- `./describe.sh <介紹文字>`：當賣家時寫介紹，買家只看得到名稱和這段介紹
-- `./bid.sh <金額>`：輪到你時公開喊價
-- `./pass.sh`：退出這件拍品
+## Commands (only the ones available right now exist)
+
+- `./join.sh <name>`: join the game
+- `./pick.sh <treasure name>`: choose this round's lot (see hand.md)
+- `./describe.sh <pitch>`: write the pitch when you are the seller; buyers see only the name and this text
+- `./bid.sh <amount>`: bid on your turn
+- `./pass.sh`: drop out of this lot
 """
-
-
-STEP = 5  # 加價的最小幅度
 
 
 @dataclass
@@ -55,32 +60,32 @@ class Treasure:
         return max(0, self.base + sum(v for _, v in self.traits))
 
     def card(self) -> str:
-        lines = [f"**{self.name}**（真實價值 {self.value}）", f"- 底價 {self.base}"]
-        return "\n".join(lines + [f"- {t}（{v:+d}）" for t, v in self.traits])
+        lines = [f"**{self.name}** (true value {self.value})", f"- base price {self.base}"]
+        return "\n".join(lines + [f"- {t} ({v:+d})" for t, v in self.traits])
 
 
-# ---------------- 遊戲：純邏輯，不知道資料夾的存在 ----------------
+# ---------------- Game: pure logic, knows nothing about folders ----------------
 
 class Auction:
     step = STEP
 
     def __init__(self, n, rounds=1, seed=None, money=100):
-        self.lock = threading.Lock()  # 所有讀寫都在這把鎖裡
-        self.uis: list[FolderUI] = []  # 狀態改變時要通知重畫的 UI
-        self.events: list[str] = []    # 所有人都看得到的訊息，只往後加
+        self.lock = threading.Lock()  # every read and write happens under this lock
+        self.uis: list[FolderUI] = []  # UIs to refresh when the state changes
+        self.events: list[str] = []    # messages everyone can see, append-only
         self.rng = random.Random(seed)
         self.n, self.rounds, self.round = n, rounds, 0
         self.names: list[str | None] = [None] * n
         self.money = [money] * n
         self.owned: list[list[Treasure]] = [[] for _ in range(n)]
         self.history: list[str] = []
-        self.phase = "join"          # join → (pick → describe ⇄ bid) × rounds → over
+        self.phase = "join"          # join -> (pick -> describe <-> bid) x rounds -> over
         self.seller = 0
-        self.sold = 0                # 這輪已經拍完幾場
+        self.sold = 0                # lots finished this round
         self.pitch = ""
-        self.high, self.leader = 0, None    # 目前最高價與出價者
-        self.active: set[int] = set()        # 還沒退出這件拍品的買家
-        self.turn = None                     # 輪到誰喊價
+        self.high, self.leader = 0, None    # current high bid and bidder
+        self.active: set[int] = set()        # buyers who have not dropped out of this lot
+        self.turn = None                     # whose turn it is to bid
         self.bidlog: list[str] = []
         self.deal()
 
@@ -89,7 +94,7 @@ class Auction:
         self.hands = [[Treasure(name, self.rng.randint(20, 60), self.rng.sample(TRAITS, 2))
                        for name in self.rng.sample(NAMES, 3)] for _ in range(self.n)]
         self.lots: list[Treasure | None] = [None] * self.n
-        self.seller = (self.round - 1) % self.n   # 每輪換人先賣
+        self.seller = (self.round - 1) % self.n   # a different player sells first each round
         self.sold = 0
 
     def name(self, p):
@@ -99,7 +104,7 @@ class Auction:
         self.events.append(text)
 
     def act(self, p, kind, arg):
-        """玩家 p 的操作：違反規則就 raise ValueError，成功就通知所有 UI 重畫。"""
+        """Player p's move: raise ValueError if it breaks the rules; on success, refresh every UI."""
         with self.lock:
             result = getattr(self, f"do_{kind}")(p, arg)
         for ui in self.uis:
@@ -108,55 +113,57 @@ class Auction:
 
     def do_join(self, p, name):
         if self.phase != "join" or self.names[p]:
-            raise ValueError("現在不能加入")
+            raise ValueError("you cannot join now")
         if not 1 <= len(name) <= 20 or name in self.names:
-            raise ValueError("名字需為 1-20 字，且不能和別人重複")
+            raise ValueError("the name must be 1-20 characters and not already taken")
         self.names[p] = name
         if all(self.names):
             self.phase = "pick"
-            self.say("所有玩家已加入：" + "、".join(self.names) + f"\n\n## 第 1/{self.rounds} 輪")
-        return f"✅ 歡迎，{name}"
+            self.say("All players have joined: " + ", ".join(self.names) + f"\n\n## Round 1/{self.rounds}")
+        return f"✅ Welcome, {name}"
 
     def do_pick(self, p, tname):
         if self.phase != "pick" or self.lots[p]:
-            raise ValueError("現在不能選寶物")
+            raise ValueError("you cannot pick a treasure now")
         lot = next((t for t in self.hands[p] if t.name == tname), None)
         if lot is None:
-            raise ValueError("選項必須是：" + " / ".join(t.name for t in self.hands[p]))
+            raise ValueError("choose one of: " + " / ".join(t.name for t in self.hands[p]))
         self.lots[p] = lot
         if all(self.lots):
             self.phase = "describe"
-            self.say(f"每位玩家都選好了拍品，由 {self.name(self.seller)} 先賣。")
-        return f"✅ 你選了 {tname}"
+            self.say(f"Everyone has picked a lot. {self.name(self.seller)} sells first.")
+        return f"✅ You picked {tname}"
 
     def do_describe(self, p, text):
         if self.phase != "describe" or p != self.seller:
-            raise ValueError("現在不是你介紹的時候")
+            raise ValueError("it is not your turn to pitch")
         if not 1 <= len(text) <= 500:
-            raise ValueError("介紹需為 1-500 字")
+            raise ValueError("the pitch must be 1-500 characters")
         self.pitch, self.phase = text, "bid"
         self.high, self.leader, self.bidlog = 0, None, []
         self.active = {b for b in range(self.n) if b != p}
         self.turn = (p + 1) % self.n
-        self.say(f"🔔 {self.name(p)} 拍賣「{self.lots[p].name}」：\n> {text}\n\n由 {self.name(self.turn)} 先喊價。")
-        return "✅ 已送出介紹"
+        self.say(f"🔔 {self.name(p)} is selling \"{self.lots[p].name}\":\n> {text}\n\n"
+                 f"{self.name(self.turn)} bids first.")
+        return "✅ Pitch submitted"
 
     def min_bid(self):
         return self.high + self.step if self.leader is not None else 1
 
     def do_bid(self, p, amount):
         if self.phase != "bid" or p != self.turn:
-            raise ValueError("現在不是你喊價的時候")
+            raise ValueError("it is not your turn to bid")
         if amount is None:
             self.active.discard(p)
-            self.bidlog.append(f"{self.name(p)} 退出")
+            self.bidlog.append(f"{self.name(p)} drops out")
         else:
             if not self.min_bid() <= amount <= self.money[p]:
-                raise ValueError(f"出價需在 {self.min_bid()}-{self.money[p]} 之間"
-                                 if self.min_bid() <= self.money[p] else "你的錢不夠加價，只能退出")
+                raise ValueError(f"the bid must be between {self.min_bid()} and {self.money[p]}"
+                                 if self.min_bid() <= self.money[p]
+                                 else "you cannot afford to raise; you can only pass")
             self.high, self.leader = amount, p
             self.bidlog.append(f"{self.name(p)} {amount}")
-        self.say(f"📣 {self.bidlog[-1]}" + (f"（目前最高：{self.name(self.leader)} {self.high}）"
+        self.say(f"📣 {self.bidlog[-1]}" + (f" (high bid: {self.name(self.leader)} {self.high})"
                                             if self.leader is not None else ""))
         rivals = self.active - {self.leader}
         if not rivals:
@@ -164,7 +171,7 @@ class Auction:
         else:
             self.turn = next(c for k in range(1, self.n + 1)
                              if (c := (p + k) % self.n) in rivals)
-        return f"✅ 已出價 {amount}" if amount else "✅ 已退出這件拍品"
+        return f"✅ You bid {amount}" if amount else "✅ You dropped out of this lot"
 
     def settle(self):
         s, lot = self.seller, self.lots[self.seller]
@@ -174,22 +181,22 @@ class Auction:
             self.money[w] -= price
             self.money[s] += price
             self.owned[w].append(lot)
-            result = f"🔨 {self.name(w)} 以 {price} 得標"
+            result = f"🔨 {self.name(w)} wins at {price}"
         else:
             self.owned[s].append(lot)
-            result = f"流標，{self.name(s)} 留下寶物"
-        self.say(f"{result}。揭曉：\n{lot.card()}")
-        self.history.append(f"## 第 {self.round} 輪：{self.name(s)} 賣「{lot.name}」\n\n"
-                            f"介紹：\n> {self.pitch}\n\n"
-                            + "喊價：" + "、".join(self.bidlog)
-                            + f"\n\n{result}。揭曉：\n{lot.card()}\n")
+            result = f"No bids; {self.name(s)} keeps the treasure"
+        self.say(f"{result}. Revealed:\n{lot.card()}")
+        self.history.append(f"## Round {self.round}: {self.name(s)} sells \"{lot.name}\"\n\n"
+                            f"Pitch:\n> {self.pitch}\n\n"
+                            + "Bids: " + ", ".join(self.bidlog)
+                            + f"\n\n{result}. Revealed:\n{lot.card()}\n")
         self.sold += 1
         if self.sold < self.n:
             self.seller, self.phase = (s + 1) % self.n, "describe"
         elif self.round < self.rounds:
             self.deal()
             self.phase = "pick"
-            self.say(f"## 第 {self.round}/{self.rounds} 輪\n每人拿到 3 件新寶物，請重新選拍品。")
+            self.say(f"## Round {self.round}/{self.rounds}\nEveryone gets 3 new treasures; pick your lot again.")
         else:
             self.phase = "over"
             self.say(self.final_result())
@@ -219,7 +226,7 @@ class Auction:
             "min_bid": self.min_bid(),
         }
         if who == "spectator":
-            v["lots"] = [f"{self.name(p)}：{t.card()}" for p, t in enumerate(self.lots) if t]
+            v["lots"] = [f"{self.name(p)}: {t.card()}" for p, t in enumerate(self.lots) if t]
         else:
             v.update(me=who, todo=self.todo(who), money=self.money[who],
                      owned=[t.card() for t in self.owned[who]],
@@ -229,35 +236,35 @@ class Auction:
         return v
 
     def bidding(self):
-        lines = ["喊價：" + ("、".join(self.bidlog) or "（還沒有人出價）")]
+        lines = ["Bids: " + (", ".join(self.bidlog) or "(none yet)")]
         if self.leader is not None:
-            lines.append(f"目前最高：{self.name(self.leader)} {self.high}")
-        lines.append("還在競標：" + "、".join(self.name(b) for b in sorted(self.active)))
-        lines.append(f"輪到：{self.name(self.turn)}")
+            lines.append(f"High bid: {self.name(self.leader)} {self.high}")
+        lines.append("Still in: " + ", ".join(self.name(b) for b in sorted(self.active)))
+        lines.append(f"Turn: {self.name(self.turn)}")
         return "\n".join(lines)
 
     def final_result(self):
         scores = [self.money[p] + sum(t.value for t in self.owned[p]) for p in range(self.n)]
-        lines = ["# 最終結果", "", "| 玩家 | 金錢 | 寶物價值 | 總分 |", "|---|---|---|---|"]
+        lines = ["# Final result", "", "| Player | Gold | Treasure value | Score |", "|---|---|---|---|"]
         for p in sorted(range(self.n), key=lambda p: -scores[p]):
             lines.append(f"| {self.name(p)} | {self.money[p]} | {scores[p] - self.money[p]} | {scores[p]} |")
         best = max(scores)
-        return "\n".join(lines + ["", "🏆 獲勝：" + "、".join(self.name(p) for p in range(self.n)
-                                                          if scores[p] == best)])
+        return "\n".join(lines + ["", "🏆 Winner: " + ", ".join(self.name(p) for p in range(self.n)
+                                                              if scores[p] == best)])
 
 
-# ---------------- 客戶端：每個資料夾一個 FolderUI ----------------
+# ---------------- UIs: one FolderUI per folder ----------------
 
 def roster_md(v):
-    rows = [f"# 玩家（第 {v['round']}/{v['rounds']} 輪）", "", "| 名字 | 金錢 | 寶物 |", "|---|---|---|"]
-    return "\n".join(rows + [f"| {n} | 💰 {m} | 🏺 {k} 件 |" for n, m, k in v["roster"]]) + "\n"
+    rows = [f"# Players (round {v['round']}/{v['rounds']})", "", "| Name | Gold | Treasures |", "|---|---|---|"]
+    return "\n".join(rows + [f"| {n} | 💰 {m} | 🏺 {k} |" for n, m, k in v["roster"]]) + "\n"
 
 
 class PlayerUI(FolderUI):
     def __init__(self, path, game, me):
         super().__init__(path)
         self.game, self.me = game, me
-        self.seen = 0  # 已經在回應裡給這個玩家看過幾則訊息
+        self.seen = 0  # how many events this player has already been shown in a response
 
     def draw(self):
         with self.game.lock:
@@ -266,17 +273,17 @@ class PlayerUI(FolderUI):
             self.close()
         self.file("rules.md", RULES.format(rounds=v["rounds"], step=STEP))
         self.file("players.md", roster_md(v))
-        if v["history"]:  # 只往後加 → 適合當紀錄
-            self.file("history.md", "# 拍賣紀錄\n\n" + "\n".join(v["history"]))
+        if v["history"]:  # append-only, so it works well as a log
+            self.file("history.md", "# Auction history\n\n" + "\n".join(v["history"]))
         if v["owned"]:
-            self.file("owned.md", "# 你擁有的寶物\n\n" + "\n\n".join(v["owned"]) + "\n")
+            self.file("owned.md", "# Treasures you own\n\n" + "\n\n".join(v["owned"]) + "\n")
         if v["hand"]:
-            self.file("hand.md", "# 你的寶物（只有你看得到）\n\n" + "\n\n".join(v["hand"]) + "\n")
+            self.file("hand.md", "# Your treasures (only you can see these)\n\n" + "\n\n".join(v["hand"]) + "\n")
         if v["my_lot"]:
-            self.file("my_lot.md", "# 你的拍品\n\n" + v["my_lot"] + "\n")
+            self.file("my_lot.md", "# Your lot\n\n" + v["my_lot"] + "\n")
         if v["lot_name"]:
-            self.file("lot.md", f"# 拍品：{v['lot_name']}\n\n賣家：{v['seller']}\n\n"
-                      + (f"> {v['pitch']}\n\n{v['bidding']}\n" if v["pitch"] else "（賣家正在寫介紹…）\n"))
+            self.file("lot.md", f"# Lot: {v['lot_name']}\n\nSeller: {v['seller']}\n\n"
+                      + (f"> {v['pitch']}\n\n{v['bidding']}\n" if v["pitch"] else "(the seller is writing a pitch...)\n"))
 
         todo = v["todo"]
         if todo in ("join", "pick", "describe"):
@@ -292,19 +299,19 @@ class PlayerUI(FolderUI):
             new, self.seen = self.game.events[self.seen:], len(self.game.events)
         todo = v["todo"]
         if todo == "join":
-            now = "👉 用 ./join.sh <名字> 加入遊戲（規則見 rules.md）。"
+            now = "👉 Join the game with ./join.sh <name> (rules in rules.md)."
         elif todo == "pick":
-            now = (f"👉 第 {v['round']}/{v['rounds']} 輪：用 ./pick.sh <寶物名稱> 選一件拿去拍賣（詳見 hand.md）。"
-                   "選項：" + " / ".join(v["options"]))
+            now = (f"👉 Round {v['round']}/{v['rounds']}: pick a lot with ./pick.sh <treasure name> (see hand.md). "
+                   "Options: " + " / ".join(v["options"]))
         elif todo == "describe":
-            now = f"👉 輪到你當賣家，用 ./describe.sh <介紹文字> 介紹你的拍品：\n{v['my_lot']}"
+            now = f"👉 You are the seller. Pitch your lot with ./describe.sh <pitch>:\n{v['my_lot']}"
         elif todo == "bid":
-            how = (f"./bid.sh <金額>（至少 {v['min_bid']}）或 ./pass.sh" if "bid" in self.inputs
-                   else "你的錢不夠加價，只能 ./pass.sh")
-            now = (f"{v['seller']} 正在拍賣「{v['lot_name']}」：\n> {v['pitch']}\n\n"
-                   f"{v['bidding']}\n\n👉 輪到你喊價（你有 💰 {v['money']}）：{how}")
+            how = (f"./bid.sh <amount> (at least {v['min_bid']}) or ./pass.sh" if "bid" in self.inputs
+                   else "you cannot afford to raise; only ./pass.sh")
+            now = (f"{v['seller']} is selling \"{v['lot_name']}\":\n> {v['pitch']}\n\n"
+                   f"{v['bidding']}\n\n👉 Your turn to bid (you have 💰 {v['money']}): {how}")
         elif self.closed:
-            now = "── 遊戲結束 ──"
+            now = "── Game over ──"
         else:
             now = ""
         return "\n\n".join(x for x in [result, *new, now] if x)
@@ -314,16 +321,16 @@ class PlayerUI(FolderUI):
         if name == "pass":
             return self.game.act(self.me, "bid", None)
         if not text:
-            raise ValueError(f"用法：./{name}.sh <內容>")
+            raise ValueError(f"usage: ./{name}.sh <text>")
         if name == "bid":
             if not text.isdigit():
-                raise ValueError("出價必須是正整數")
+                raise ValueError("the bid must be a positive integer")
             return self.game.act(self.me, "bid", int(text))
         return self.game.act(self.me, name, text)
 
 
 class SpectatorUI(FolderUI):
-    """觀眾：看得到所有拍品的真相，沒有按鈕。紀錄寫成只往後加的 log.md。"""
+    """Spectator: sees the truth about every lot and has no buttons. The log is an append-only log.md."""
 
     def __init__(self, path, game):
         super().__init__(path)
@@ -337,9 +344,9 @@ class SpectatorUI(FolderUI):
             self.close()
         self.file("players.md", roster_md(v))
         if v["lots"]:
-            self.file("truth.md", "# 所有拍品的真相\n\n" + "\n\n".join(v["lots"]) + "\n")
+            self.file("truth.md", "# The truth about every lot\n\n" + "\n\n".join(v["lots"]) + "\n")
         if v["lot_name"]:
-            self.file("lot.md", f"# 拍品：{v['lot_name']}\n\n> {v['pitch'] or '（賣家正在寫介紹…）'}\n\n"
+            self.file("lot.md", f"# Lot: {v['lot_name']}\n\n> {v['pitch'] or '(the seller is writing a pitch...)'}\n\n"
                       + (v["bidding"] or "") + "\n")
         if events:
             self.file("log.md", "".join(e + "\n\n" for e in events))
@@ -353,7 +360,7 @@ def main():
     ap.add_argument("--dir")
     args = ap.parse_args()
     if not 2 <= args.players <= 6:
-        raise SystemExit("玩家數需為 2-6")
+        raise SystemExit("players must be between 2 and 6")
     root = Path(args.dir or tempfile.mkdtemp(prefix="folderui-auction-"))
 
     game = Auction(args.players, args.rounds, args.seed)

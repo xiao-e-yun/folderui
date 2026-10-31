@@ -1,11 +1,15 @@
-"""拍賣用的隨機 bot（程式型 agent 範例）：python examples/auction_bot.py <資料夾> <名字>"""
+"""A random bot for the auction (example of driving a FolderUI from code):
+
+    python examples/auction_bot.py <folder> <name>
+"""
 import random
 import re
 import sys
 
 from folderui import Session
 
-PITCHES = ["傳說中的寶物，絕對物超所值！", "家族世代相傳，保存完好。", "老實說，我也不確定它值多少。"]
+PITCHES = ["A legendary treasure, worth every coin!", "A family heirloom, well preserved.",
+           "Honestly, I'm not sure what it's worth."]
 
 
 def main(path, name):
@@ -14,19 +18,19 @@ def main(path, name):
     while inputs := s.inputs():
         if "join" in inputs:
             ok, _ = s.input("join", name)
-            if not ok:  # 名字被用走了
+            if not ok:  # name already taken
                 name += "'"
-        elif "pick" in inputs:  # hand.md 裡的 **名稱** 就是選項
+        elif "pick" in inputs:  # the **names** in hand.md are the options
             s.input("pick", rng.choice(re.findall(r"\*\*(.+?)\*\*", s.read("hand.md"))))
         elif "describe" in inputs:
             s.input("describe", rng.choice(PITCHES))
         elif "bid" in inputs and rng.random() < 0.6:
             ok, _ = s.input("bid", str(rng.randint(5, 60)))
-            if not ok:  # 低於最低加價或錢不夠，改成退出
+            if not ok:  # below the minimum raise or not enough money: drop out instead
                 s.input("pass")
         elif "pass" in inputs:
             s.input("pass")
-    print(f"{name}: 結束")
+    print(f"{name}: done")
 
 
 if __name__ == "__main__":

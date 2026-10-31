@@ -1,4 +1,4 @@
-"""folderui：把資料夾變成給人類與 AI agent 用的立即式 GUI。"""
+"""folderui: turn a folder into an immediate-mode GUI for humans and AI agents."""
 from .session import Session
 from .ui import FolderUI
 

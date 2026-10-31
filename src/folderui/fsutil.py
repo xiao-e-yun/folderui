@@ -1,5 +1,4 @@
-"""檔案工具：所有寫入都是原子的（先寫暫存檔再 rename），避免讀到半個檔案。"""
-import json
+"""File helpers: every write is atomic (write a temp file, then rename) so readers never see half a file."""
 import os
 from pathlib import Path
 
@@ -12,17 +11,8 @@ def write_text(path: Path, text: str, mode: int | None = None) -> None:
     os.replace(tmp, path)
 
 
-def write_json(path: Path, data) -> None:
-    write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-
-
 def read_text(path: Path, default=None):
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return default
-
-
-def read_json(path: Path, default=None):
-    text = read_text(path)
-    return default if text is None else json.loads(text)
