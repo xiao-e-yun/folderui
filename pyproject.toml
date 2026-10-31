@@ -1,6 +1,6 @@
 [project]
 name = "folderui"
-version = "0.1.0"
+version = "0.2.0"
 description = "Turn a folder into an immediate-mode GUI for humans and AI agents: *.md files are the view, *.sh files are buttons."
 readme = "README.md"
 license = "MIT"

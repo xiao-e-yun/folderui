@@ -2,14 +2,15 @@
 
 Subclasses implement:
     draw()                 Re-declare the whole screen every frame; must not change state: file(), input(), close()
-    action(name, args)     Called when a button is pressed: return text, or raise to signal failure
+    action(name, args)     Called when a button is pressed: return text, or raise to reject it
     display(result)        (optional) Called once per response; its return value is the response text.
                            Defaults to returning result unchanged.
 
 The folder contains only the files and button scripts (<path>.sh) declared by draw(). A button script
 blocks until the first frame after the action that has a button available (or close()), then prints
-display(result) and exits. result is the action's return value or error message; exit code 0 means
-success, 1 means failure.
+display(result) and exits. result is the action's return value, or the message of the exception it
+raised. The exit code is 0 whenever the app answered (even if it rejected the action); 1 means the
+framework could not deliver the action (another action is in flight, or the button is gone).
 
 When another thread changes the state (e.g. another player's move), call refresh() to redraw this UI.
 
@@ -17,6 +18,8 @@ Protocol between scripts and host (hidden files):
     .request     written by the script: button path and arguments, NUL-separated
     .response    written by the host: first line is the exit code, the rest is the response text
     .done        the host renames .request to .done after responding; the script deletes it after reading
+                 (a response nobody read is dropped when a different action is submitted)
+    .lock        directory held by a script while it submits, so concurrent presses are rejected
     .state.json  buttons available right now (for Session)
 """
 import json
@@ -31,25 +34,32 @@ from pathlib import Path
 from .fsutil import write_text
 
 PROTOCOL_FILES = (".request", ".request.new", ".response", ".done")
+LOCK = ".lock"
 
 SCRIPT = """\
 #!/bin/sh
 # folderui button: {name}
 cd {root} || exit 1
+if ! mkdir .lock 2>/dev/null; then
+  echo "❌ Another action is being submitted; try again"
+  exit 1
+fi
 printf '%s\\0' {qname} "$@" > .request.new
 if [ -e .request ]; then  # interrupted last time (e.g. the agent's command timed out): same command = keep waiting
   if ! cmp -s .request .request.new; then
     rm -f .request.new
+    rmdir .lock
     echo "❌ The previous action is still waiting for a response; run the same command again to keep waiting"
     exit 1
   fi
   rm -f .request.new
 elif [ -e .done ] && cmp -s .done .request.new; then  # response is ready but has not been read yet
   rm -f .request.new
-else
+else  # a new action; an unread response to a different action is dropped
   rm -f .done .response
   mv .request.new .request
 fi
+rmdir .lock
 while [ -e .request ]; do sleep 0.2; done
 code=$(head -n 1 .response)
 tail -n +2 .response
@@ -78,7 +88,7 @@ class FolderUI:
         self._inputs: list[str] = []
         self._disk_files: dict[str, str] = {}      # files on disk managed by the framework
         self._disk_scripts: dict[str, str] = {}
-        self._pending: tuple[int, str] | None = None
+        self._pending: str | None = None  # action result waiting to be sent
         self._pending_input: str | None = None  # keep this button's script until its response is read
 
     # ---- implemented by subclasses ----
@@ -91,7 +101,8 @@ class FolderUI:
 
     def display(self, result: str) -> str:
         """Called once per response (so it may record what this participant has already seen).
-        result is the action's return value or error message; the return value is the response text.
+        result is the action's return value or the message of the exception it raised; the return value
+        is the response text.
         self.inputs lists the buttons available right now."""
         return result
 
@@ -129,6 +140,8 @@ class FolderUI:
             return t
         for name in PROTOCOL_FILES:
             (self.root / name).unlink(missing_ok=True)
+        if (self.root / LOCK).is_dir():
+            (self.root / LOCK).rmdir()
         self._redraw()
         deadline = None
         while not (self.closed and self._pending is None and self._pending_input is None):
@@ -136,8 +149,10 @@ class FolderUI:
                 deadline = deadline or time.monotonic() + self.close_grace
                 if time.monotonic() > deadline:
                     break
-            changed = self._dirty.wait(self.poll)
-            self._dirty.clear()
+            self._dirty.wait(self.poll)
+            changed = self._dirty.is_set()  # clear only after seeing it set; a refresh() racing a timeout is never lost
+            if changed:
+                self._dirty.clear()  # the redraw below runs after this, so it sees the newest state
             changed |= self._take_request()
             if self._pending is None and self._pending_input and not (self.root / ".done").exists():
                 self._pending_input = None  # the response has been read
@@ -163,23 +178,23 @@ class FolderUI:
             return False
         self._pending_input = name
         try:
-            result = self.action(name, args)
-            self._pending = (0, result or "")
-        except Exception as e:
+            result = self.action(name, args) or ""
+        except Exception as e:  # the app answered by rejecting: still exit code 0, message passed as-is
             if not isinstance(e, ValueError):  # ValueError is a user error; anything else is a bug
                 traceback.print_exc()
-            self._pending = (1, f"❌ {e}")
+            result = str(e) or type(e).__name__
+        self._pending = result
         return True
 
     def _respond(self) -> None:
-        code, result = self._pending
+        result = self._pending
         try:
             text = self.display(result)
         except Exception:
             print(f"[folderui:{self.root.name}] error in display():", file=sys.stderr)
             traceback.print_exc()
             text = result
-        self._write_response(code, text)
+        self._write_response(0, text)
         self._pending = None
 
     def _write_response(self, code: int, text: str | None) -> None:

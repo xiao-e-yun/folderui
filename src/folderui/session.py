@@ -28,12 +28,21 @@ class Session:
         return read_text(self.root / path, "")
 
     def input(self, path: str, *args: str, timeout: float | None = None) -> tuple[bool, str]:
-        """Press a button and wait for the response. Returns (success, response text)."""
-        request = self.root / ".request"
-        if request.exists():
-            raise RuntimeError("the previous action is still waiting for a response")
-        (self.root / ".done").unlink(missing_ok=True)
-        write_text(request, "".join(f"{x}\0" for x in (path, *args)))
+        """Press a button and wait for the response. Returns (delivered, response text).
+        delivered is False only when the framework could not deliver the action (e.g. the button is gone);
+        whether the app accepted it is up to the app's response text."""
+        lock, request = self.root / ".lock", self.root / ".request"
+        try:
+            lock.mkdir()
+        except FileExistsError:
+            raise RuntimeError("another action is being submitted") from None
+        try:
+            if request.exists():
+                raise RuntimeError("the previous action is still waiting for a response")
+            (self.root / ".done").unlink(missing_ok=True)
+            write_text(request, "".join(f"{x}\0" for x in (path, *args)))
+        finally:
+            lock.rmdir()
         deadline = None if timeout is None else time.monotonic() + timeout
         while request.exists():
             if deadline is not None and time.monotonic() > deadline:

@@ -28,7 +28,7 @@ class Guess(FolderUI):
 
     def action(self, name, args):
         if len(args) != 1 or not args[0].isdigit() or not 1 <= int(args[0]) <= 100:
-            raise ValueError("usage: ./guess.sh <integer from 1 to 100>")
+            raise ValueError("❌ usage: ./guess.sh <integer from 1 to 100>")
         n = int(args[0])
         result = "🎉 correct" if n == self.secret else ("too high" if n > self.secret else "too low")
         self.tries.append((n, result))

@@ -317,7 +317,12 @@ class PlayerUI(FolderUI):
         return "\n\n".join(x for x in [result, *new, now] if x)
 
     def action(self, name, args):
-        text = " ".join(args).strip()
+        try:
+            return self.move(name, " ".join(args).strip())
+        except ValueError as e:
+            raise ValueError(f"❌ {e}") from None
+
+    def move(self, name, text):
         if name == "pass":
             return self.game.act(self.me, "bid", None)
         if not text:

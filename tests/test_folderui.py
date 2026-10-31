@@ -43,7 +43,7 @@ def test_session_press(counter):
     ui, s = counter
     assert s.inputs() == ["add"]
     ok, text = s.input("add", "2", timeout=5)
-    assert not ok and "can only add 1" in text
+    assert ok and text == "can only add 1"  # the app rejected it, but it was delivered
     ok, text = s.input("add", "1", timeout=5)
     assert ok and text == "now 1"
     assert s.read("count.md") == "1\n"
@@ -67,7 +67,7 @@ def test_shell_button(counter):
     r = subprocess.run([str(ui.root / "add.sh"), "1"], capture_output=True, text=True, timeout=10)
     assert r.returncode == 0 and "now 1" in r.stdout
     r = subprocess.run([str(ui.root / "add.sh"), "x"], capture_output=True, text=True, timeout=10)
-    assert r.returncode == 1 and "can only add 1" in r.stdout
+    assert r.returncode == 0 and "can only add 1" in r.stdout
 
 
 class Lobby:
@@ -173,3 +173,13 @@ def test_stale_input_is_rejected_without_calling_action(counter):
     ui.action = lambda name, args: calls.append(name)
     ok, text = s.input("gone", timeout=5)  # no such button on screen (e.g. a script from an old screen)
     assert not ok and "unavailable" in text and calls == []
+
+
+def test_concurrent_press_is_rejected_by_lock(counter):
+    ui, s = counter
+    (ui.root / ".lock").mkdir()  # another script is in the middle of submitting
+    r = subprocess.run([str(ui.root / "add.sh"), "1"], capture_output=True, text=True, timeout=10)
+    assert r.returncode == 1 and "Another action" in r.stdout
+    (ui.root / ".lock").rmdir()
+    ok, text = s.input("add", "1", timeout=5)
+    assert ok and text == "now 1"
