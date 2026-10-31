@@ -1,9 +1,10 @@
 # folderui
 
-Turn **a folder into an immediate-mode GUI** for humans and AI agents. The folder holds only two kinds of things:
+Turn **a folder into an immediate-mode GUI** for humans and AI agents. `ls -l` tells you what everything is:
 
-- `*.md` and other files: the screen (`cat` them any time)
-- `*.sh`: buttons (only the ones you can press right now exist)
+- `-r--r--r--` files: the screen (`cat` them any time)
+- `-rw-r--r--` files: settings you may edit; saving applies them
+- `-rwxr-xr-x` `*.sh`: buttons (only the ones you can press right now exist; `./x.sh --help` explains one)
 
 Running a button **blocks until you have the next decision to make**, then prints whatever the app decides
 (the result of your action, what happened meanwhile, what you can do now). The framework prints nothing of its own.
@@ -23,16 +24,16 @@ $ ./bid.sh 40                   ← blocks while the other players are bidding
 
 ## Writing a UI
 
-Subclasses implement `draw()` to declare the screen and `action()` to handle buttons; the optional `display()`
-decides what the response says.
+`draw()` returns the screen as a tree of nodes; `action()` handles buttons; the optional `display()` decides what
+the response says.
 
 ```python
-from folderui import FolderUI
+from folderui import Action, File, FolderUI
 
 class Guess(FolderUI):
-    def draw(self):                      # re-declare the whole screen every frame; must not change state
-        self.file("rules.md", "Guess 1-100 with ./guess.sh <number>")
-        self.input("guess")
+    def draw(self):                      # the whole screen, every frame; must not change state
+        return [File("rules.md", "Guess 1-100 with ./guess.sh <number>"),
+                Action("guess", help="./guess.sh <number>: guess a number from 1 to 100")]
 
     def action(self, name, args):        # a button was pressed: return text (a rejection is just text, too)
         ...
@@ -44,14 +45,22 @@ class Guess(FolderUI):
 Guess("/tmp/my-ui").run()
 ```
 
+| Node | Becomes |
+|---|---|
+| `File(name, content, writable=False)` | A file: read-only (444), or writable (644) for a draft that a button submits |
+| `Action(name, help="")` | A button `<name>.sh` (755); `--help` prints `help` without pressing it |
+| `Folder(name, children)` | A sub-folder; button names inside it are paths (`players/2/kick`) |
+| `Editable(name, data)` | A TOML file the user edits (644), bound to a dict, a dataclass or an object (see below) |
+
 | Method | Called from | Purpose |
 |---|---|---|
-| `file(path, content)` | `draw()` | Declare a file; undeclared files are deleted |
-| `input(path)` | `draw()` | Declare a button → `<path>.sh`; paths may be nested (`players/2/kick`). Document usage in your `.md` files |
 | `close()` | `draw()` or anywhere | Finish: remove the buttons, answer the waiting script, return from `run()` |
 | `refresh()` | any thread | The state was changed elsewhere: redraw this UI (does not block) |
 | `run(background=False)` | | Run the main loop; with `background=True`, run it in a thread and return the thread |
 | `inputs` | `display()` | Read-only list of the buttons available right now |
+
+A file is written only when what `draw()` says for it changes (or it was deleted), so a file the user changed
+stays as it is until its content changes.
 
 The response is `display(result)`; without a `display()` it is just the action's return value. Like HTTP:
 
@@ -80,6 +89,51 @@ available (or after `close()`).
 - Invalid input → state unchanged, buttons still there → respond immediately (the app's error text)
 - Queries → buttons still there → respond immediately
 - Waiting for others after acting → no buttons → wait until it's your turn
+
+## Your own nodes, and events that bubble up
+
+A node is anything with `render(ctx)`. `ctx` has the primitives: `folder(name)` (a sub-ctx), `file(name, content, writable=False)`,
+`action(name, help)`, `render(node)` for children, and `read(name)` for what is on disk now. A node may also
+handle the buttons it placed with `action(name, args, ctx)` (names relative to where the node was placed):
+return a response to answer right there, return `PASS` to let it bubble up, or `ctx.emit(name, *args)` to send
+its own event up. Whatever reaches the top goes to the UI's `action(name, args)`, with the full path.
+
+```python
+class Inventory(Node):
+    def render(self, ctx):
+        for box, items in self.boxes.items():
+            ctx.file(f"{box}.md", "\n".join(items))
+        ctx.action("apply", help="move lines between the box files, then run this")
+
+    def action(self, name, args, ctx):
+        moves = diff(self.boxes, {box: ctx.read(f"{box}.md").split() for box in self.boxes})
+        if not moves:
+            return "Nothing moved."               # answered here
+        return ctx.emit("move", moves)            # the UI gets action("inventory/move", [moves])
+
+def draw(self):
+    return [Folder("inventory", [Inventory(self.boxes)])]
+```
+
+## Editable settings
+
+```python
+@dataclass
+class Prefs:
+    volume: int = field(default=5, metadata={"help": "0-10"})   # help becomes a comment in the file
+
+    def check(self, new):                                        # optional: raise ValueError to refuse
+        if not 0 <= new["volume"] <= 10:
+            raise ValueError("volume must be 0-10")
+
+def draw(self):
+    return [Editable("prefs.toml", self.prefs), ...]
+```
+
+When the user saves the file, the values are checked (known keys, the same types, then `check()`) and written
+into the object in place, on the UI's thread, and the screen is redrawn. If anything is wrong, nothing changes,
+the user's file is left for them to fix, and the reason is in `prefs.toml.error`. A file left from before is read,
+not overwritten. Values may be strings, numbers, booleans and lists of them.
 
 ## Multiplayer: shared state + a lock + refresh()
 

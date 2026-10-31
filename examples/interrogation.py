@@ -11,7 +11,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from folderui import FolderUI
+from folderui import Action, File, FolderUI
 
 SUSPECTS = ["Mara", "Theo", "Iris", "Jonah"]
 CULPRIT = "Mara"
@@ -336,28 +336,30 @@ class SuspectUI(FolderUI):
         self.game, self.me, self.seen = game, me, 0
 
     def draw(self):
+        out = []
         g = self.game
         with g.lock:
             if g.phase == "over":
                 self.close()
-            self.file("rules.md", SUSPECT_RULES.format(huddle=HUDDLE_LIMIT))
-            self.file("role.md", ROLES[self.me])
-            self.file("case.md", CASE)
+            out.append(File("rules.md", SUSPECT_RULES.format(huddle=HUDDLE_LIMIT)))
+            out.append(File("role.md", ROLES[self.me]))
+            out.append(File("case.md", CASE))
             room = [e for to, e in g.events if self.me in to and e.startswith("[waiting room]")]
             if room:
-                self.file("waiting_room.md", "# Waiting room\n\n" + "\n\n".join(room) + "\n")
+                out.append(File("waiting_room.md", "# Waiting room\n\n" + "\n\n".join(room) + "\n"))
             if g.transcripts[self.me]:
-                self.file("transcript.md", "# Your interrogation\n\n" + "\n\n".join(g.transcripts[self.me]) + "\n")
+                out.append(File("transcript.md", "# Your interrogation\n\n" + "\n\n".join(g.transcripts[self.me]) + "\n"))
             if g.phase == "huddle" and self.me not in g.ready:
                 if g.said[self.me] < HUDDLE_LIMIT:
-                    self.input("say")
-                self.input("ready")
+                    out.append(Action("say"))
+                out.append(Action("ready"))
             elif g.pending and g.pending[0] == self.me:
                 if g.pending[1] == "question":
-                    self.input("answer")
+                    out.append(Action("answer"))
                 else:
-                    self.input("accept")
-                    self.input("decline")
+                    out.append(Action("accept"))
+                    out.append(Action("decline"))
+        return out
 
     def display(self, result):
         g = self.game
@@ -397,30 +399,32 @@ class DetectiveUI(FolderUI):
         self.game, self.questions, self.seen = game, questions, 0
 
     def draw(self):
+        out = []
         g = self.game
         with g.lock:
             if g.phase == "over":
                 self.close()
-            self.file("rules.md", DETECTIVE_RULES.format(questions=self.questions, deals=DEAL_LIMIT,
-                                                         kinds=", ".join(SECRET_KINDS)))
-            self.file("case.md", CASE)
-            self.file("evidence.md", "# Evidence\n\n" + "\n".join(f"- **{k}**: {v}" for k, v in EVIDENCE.items()) + "\n")
+            out.append(File("rules.md", DETECTIVE_RULES.format(questions=self.questions, deals=DEAL_LIMIT,
+                                                         kinds=", ".join(SECRET_KINDS))))
+            out.append(File("case.md", CASE))
+            out.append(File("evidence.md", "# Evidence\n\n" + "\n".join(f"- **{k}**: {v}" for k, v in EVIDENCE.items()) + "\n"))
             for s in SUSPECTS:
                 if g.transcripts[s]:
-                    self.file(f"transcripts/{s}.md", f"# Interrogation of {s}\n\n" + "\n\n".join(g.transcripts[s]) + "\n")
+                    out.append(File(f"transcripts/{s}.md", f"# Interrogation of {s}\n\n" + "\n\n".join(g.transcripts[s]) + "\n"))
             guesses = ", ".join(f"{s}: {k}" for s, k in g.secret_guesses.items()) or "none yet"
-            self.file("status.md", f"# Status\n\nQuestions left: {g.questions_left}\nDeals left: {g.deals_left}\n"
-                                   f"Deals taken: {g.deals or 'none'}\nYour secret guesses: {guesses}\n")
+            out.append(File("status.md", f"# Status\n\nQuestions left: {g.questions_left}\nDeals left: {g.deals_left}\n"
+                                   f"Deals taken: {g.deals or 'none'}\nYour secret guesses: {guesses}\n"))
             if g.phase == "huddle" and not g.detective_ready:
-                self.input("begin")
+                out.append(Action("begin"))
             elif g.phase == "interrogation" and not g.pending:
                 if g.questions_left > 0:
-                    self.input("ask")
-                    self.input("show")
+                    out.append(Action("ask"))
+                    out.append(Action("show"))
                     if g.deals_left > 0:
-                        self.input("offer")
-                self.input("secret")
-                self.input("accuse")
+                        out.append(Action("offer"))
+                out.append(Action("secret"))
+                out.append(Action("accuse"))
+        return out
 
     def display(self, result):
         g = self.game
@@ -463,12 +467,14 @@ class SpectatorUI(FolderUI):
         self.game = game
 
     def draw(self):
+        out = []
         g = self.game
         with g.lock:
             if g.phase == "over":
                 self.close()
-            self.file("truth.md", f"# The truth\n\nThe thief is {CULPRIT}.\n\n" + "\n\n---\n\n".join(ROLES.values()))
-            self.file("log.md", "# Log\n\n" + "\n\n".join(g.view_for("spectator")) + "\n")
+            out.append(File("truth.md", f"# The truth\n\nThe thief is {CULPRIT}.\n\n" + "\n\n---\n\n".join(ROLES.values())))
+            out.append(File("log.md", "# Log\n\n" + "\n\n".join(g.view_for("spectator")) + "\n"))
+        return out
 
 
 def main():

@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from folderui import FolderUI
+from folderui import Action, File, FolderUI
 
 LETTERS = "ABCDEFGH"
 RECRUIT_COST = 2  # gold per point of strength
@@ -391,31 +391,33 @@ class PlayerUI(FolderUI):
         self.briefed = None    # the turn this player was last briefed on
 
     def draw(self):
+        out = []
         g = self.game
         with g.lock:
             if g.phase == "over" or (g.phase == "orders" and self.me not in g.alive):
                 self.close()
             last = LETTERS[g.n - 1]
-            self.file("rules.md", RULES.format(turns=g.turns, letter=g.letter(self.me), cost=RECRUIT_COST,
-                                               last=last, last_lower=last.lower()))
+            out.append(File("rules.md", RULES.format(turns=g.turns, letter=g.letter(self.me), cost=RECRUIT_COST,
+                                               last=last, last_lower=last.lower())))
             if g.phase == "join":
                 if not g.names[self.me]:
-                    self.input("join")
-                return
-            self.file("map.md", g.map_md(self.me))
-            self.file("units.md", g.units_md(self.me))
+                    out.append(Action("join"))
+                return out
+            out.append(File("map.md", g.map_md(self.me)))
+            out.append(File("units.md", g.units_md(self.me)))
             mine = [e for to, e in g.events if to is None or self.me in to]
-            self.file("log.md", "# Log\n\n" + "\n\n".join(mine) + "\n")
+            out.append(File("log.md", "# Log\n\n" + "\n\n".join(mine) + "\n"))
             if g.phase == "orders" and self.me in g.alive and self.me not in g.ended:
                 for u in g.units.values():
                     if u.owner == self.me:
-                        self.input(f"units/{u.id}/move")
-                        self.input(f"units/{u.id}/hold")
+                        out.append(Action(f"units/{u.id}/move"))
+                        out.append(Action(f"units/{u.id}/hold"))
                 for (x, y), o in g.towns.items():
                     if o == self.me:
-                        self.input(f"towns/{x}_{y}/recruit")
-                self.input("say")
-                self.input("end_turn")
+                        out.append(Action(f"towns/{x}_{y}/recruit"))
+                out.append(Action("say"))
+                out.append(Action("end_turn"))
+        return out
 
     def display(self, result):
         g = self.game
@@ -468,14 +470,16 @@ class SpectatorUI(FolderUI):
         self.game = game
 
     def draw(self):
+        out = []
         g = self.game
         with g.lock:
             if g.phase == "over":
                 self.close()
-            self.file("map.md", g.map_md("spectator"))
-            self.file("units.md", g.units_md("spectator"))
+            out.append(File("map.md", g.map_md("spectator")))
+            out.append(File("units.md", g.units_md("spectator")))
             public = [e for to, e in g.events if to is None or "spectator" in to]  # not each player's copy of a report
-            self.file("log.md", "# Log\n\n" + "\n\n".join(public) + "\n")
+            out.append(File("log.md", "# Log\n\n" + "\n\n".join(public) + "\n"))
+        return out
 
 
 def main():

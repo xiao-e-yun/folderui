@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import subprocess
 import threading
@@ -5,7 +6,7 @@ import time
 
 import pytest
 
-from folderui import FolderUI, Session
+from folderui import PASS, Action, Editable, File, Folder, FolderUI, Node, Session
 
 
 class Counter(FolderUI):
@@ -16,8 +17,7 @@ class Counter(FolderUI):
         self.n = 0
 
     def draw(self):
-        self.file("count.md", f"{self.n}\n")
-        self.input("add")
+        return [File("count.md", f"{self.n}\n"), Action("add", help="add 1: ./add.sh 1")]
 
     def action(self, name, args):
         if args != ["1"]:
@@ -101,10 +101,10 @@ class LobbyUI(FolderUI):
         if self.played:
             self.close()
         elif not ready:
-            self.input("ready")
+            return [Action("ready")]
         elif started:
-            self.input("play")
-        # ready but not started -> no buttons -> the script keeps waiting
+            return [Action("play")]
+        return []  # ready but not started -> no buttons -> the script keeps waiting
 
     def display(self, result):  # called once per response -> include only unseen messages
         with self.lobby.lock:
@@ -193,3 +193,149 @@ def test_exception_in_action_is_printed(counter):
     ui.action = Counter.action.__get__(ui)
     ok, text = s.input("add", "1", timeout=5)  # the UI keeps working
     assert ok and text == "now 1"
+
+
+def wait_for(fn, timeout=5):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if fn():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def start(ui):
+    thread = ui.run(background=True)
+    s = Session(ui.root)
+    assert s.ready(timeout=5)
+    return thread, s
+
+
+def stop(ui, thread):
+    ui.close()
+    thread.join(timeout=10)
+
+
+def test_modes_and_help(counter):
+    ui, s = counter
+    assert oct((ui.root / "count.md").stat().st_mode & 0o777) == "0o444"
+    assert oct((ui.root / "add.sh").stat().st_mode & 0o777) == "0o755"
+    r = subprocess.run([str(ui.root / "add.sh"), "--help"], capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0 and r.stdout == "add 1: ./add.sh 1\n" and ui.n == 0  # help does not press it
+
+
+def test_user_edits_stay_until_the_content_changes(counter):
+    ui, s = counter
+    view = ui.root / "count.md"
+    view.chmod(0o644)
+    view.write_text("my notes\n")
+    ui.refresh()
+    time.sleep(0.3)
+    assert view.read_text() == "my notes\n"  # same content drawn: not rewritten
+    s.input("add", "1", timeout=5)
+    assert view.read_text() == "1\n"  # the content changed: rewritten
+    view.unlink()
+    ui.refresh()
+    assert wait_for(lambda: view.exists() and view.read_text() == "1\n")  # deleted: written again
+
+
+class Inventory(Node):
+    """A node with its own button: checks what it can, sends the rest up as a 'move' event."""
+
+    def __init__(self, items):
+        self.items = items
+
+    def render(self, ctx):
+        box = ctx.folder("inventory")
+        box.file("items.md", "\n".join(self.items) + "\n")
+        box.action("apply")
+        box.action("other")
+
+    def action(self, name, args, ctx):
+        if name == "inventory/apply":
+            if not args:
+                return "nothing to move"  # answered here, never reaches the UI
+            return ctx.emit("move", *args)
+        return PASS
+
+
+class Shop(FolderUI):
+    def __init__(self, path):
+        super().__init__(path)
+        self.items, self.seen = ["rope"], []
+
+    def draw(self):
+        return [Folder("player", [Inventory(self.items)])]
+
+    def action(self, name, args):
+        self.seen.append((name, args))
+        if name == "player/move":
+            self.items.append(args[0])
+            return f"moved {args[0]}"
+        return f"top got {name}"
+
+
+def test_events_bubble_from_nodes_to_the_ui(tmp_path):
+    ui = Shop(tmp_path / "ui")
+    thread, s = start(ui)
+    assert s.inputs() == ["player/inventory/apply", "player/inventory/other"]
+    assert s.input("player/inventory/apply", timeout=5) == (True, "nothing to move") and ui.seen == []
+    assert s.input("player/inventory/apply", "metal", timeout=5) == (True, "moved metal")
+    assert ui.seen == [("player/move", ["metal"])]
+    assert s.read("player/inventory/items.md") == "rope\nmetal\n"
+    assert s.input("player/inventory/other", timeout=5) == (True, "top got player/inventory/other")
+    stop(ui, thread)
+
+
+@dataclasses.dataclass
+class Prefs:
+    greeting: str = dataclasses.field(default="hello", metadata={"help": "What to say"})
+    volume: int = 5
+
+    def check(self, new):
+        if not 0 <= new["volume"] <= 10:
+            raise ValueError("volume must be 0-10")
+
+
+class PrefsUI(FolderUI):
+    def __init__(self, path):
+        super().__init__(path)
+        self.prefs = Prefs()
+
+    def draw(self):
+        return [Editable("prefs.toml", self.prefs), File("view.md", f"{self.prefs.greeting} x{self.prefs.volume}\n"),
+                Action("noop")]
+
+    def action(self, name, args):
+        return "ok"
+
+
+def test_editable_binds_an_object(tmp_path):
+    ui = PrefsUI(tmp_path / "ui")
+    thread, s = start(ui)
+    prefs = ui.root / "prefs.toml"
+    assert oct(prefs.stat().st_mode & 0o777) == "0o644"
+    text = prefs.read_text()
+    assert "# What to say" in text and 'greeting = "hello"' in text and "volume = 5" in text
+    prefs.write_text(text.replace("volume = 5", "volume = 7"))
+    assert wait_for(lambda: s.read("view.md") == "hello x7\n") and ui.prefs.volume == 7
+    prefs.write_text('volume = 11\n')  # check() says no: nothing changes, the user's file stays, the reason is shown
+    assert wait_for(lambda: (ui.root / "prefs.toml.error").exists())
+    assert "volume must be 0-10" in s.read("prefs.toml.error") and ui.prefs.volume == 7
+    assert prefs.read_text() == "volume = 11\n"
+    prefs.write_text('volume = "loud"\n')
+    assert wait_for(lambda: "should look like 7" in s.read("prefs.toml.error"))
+    prefs.write_text('greeting = "hi"\n')  # keys left out keep their values
+    assert wait_for(lambda: s.read("view.md") == "hi x7\n")
+    assert wait_for(lambda: not (ui.root / "prefs.toml.error").exists())
+    stop(ui, thread)
+
+
+def test_editable_reads_the_users_file_from_before(tmp_path):
+    (tmp_path / "ui").mkdir()
+    (tmp_path / "ui" / "prefs.toml").write_text("volume = 3\n")
+    ui = PrefsUI(tmp_path / "ui")
+    thread, s = start(ui)
+    assert wait_for(lambda: s.read("view.md") == "hello x3\n")
+    stop(ui, thread)
+    assert (tmp_path / "ui" / "prefs.toml").exists()  # closing leaves the user's file

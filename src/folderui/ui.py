@@ -1,18 +1,23 @@
 """FolderUI: turn a folder into an immediate-mode GUI for humans and AI agents.
 
 Subclasses implement:
-    draw()                 Re-declare the whole screen every frame; must not change state: file(), input(), close()
-    action(name, args)     Called when a button is pressed: return text (a rejection is just text, too)
+    draw()                 Return the screen as a list of nodes (Folder, File, Action, Editable, or your own).
+                           Called every frame; must not change state.
+    action(name, args)     A button was pressed (name is its full path) or a node sent an event up with ctx.emit().
+                           Return the response text (a rejection is just text, too).
     display(result)        (optional) Called once per response; its return value is the response text.
                            Defaults to returning result unchanged.
 
-The folder contains only the files and button scripts (<path>.sh) declared by draw(). A button script
-blocks until the first frame after the action that has a button available (or close()), then prints
-display(result) and exits with code 0. If action() or display() raises, that is the app's problem: the
-error is printed instead, still with exit code 0. Exit code 1 ("Operation Unavailable") is only for the
-framework failing to deliver the action (another action in flight, or a button that is gone).
+Files are written only when what draw() says differs from the last frame (or the file was deleted), so a file
+the user changed stays as it is until its content changes. Modes tell what each file is: 444 to read,
+644 to edit (Editable), 755 to run (Action). A button script blocks until the first frame after the action that
+has a button available (or close()), then prints display(result) and exits with code 0. If action() or display()
+raises, that is the app's problem: the error is printed instead, still with exit code 0. Exit code 1
+("Operation Unavailable") is only for the framework failing to deliver the action (another action in flight,
+or a button that is gone). `./<button>.sh --help` prints the button's help without pressing it.
 
 When another thread changes the state (e.g. another player's move), call refresh() to redraw this UI.
+Editable data is updated on this UI's own thread, between frames.
 
 Protocol between scripts and host (hidden files):
     .request     written by the script: button path and arguments, NUL-separated
@@ -31,7 +36,8 @@ import time
 import traceback
 from pathlib import Path
 
-from .fsutil import write_text
+from .fsutil import read_text, write_text
+from .nodes import PASS, Ctx
 
 PROTOCOL_FILES = (".request", ".request.new", ".response", ".done")
 LOCK = ".lock"
@@ -39,6 +45,12 @@ LOCK = ".lock"
 SCRIPT = """\
 #!/bin/sh
 # folderui button: {name}
+if [ "$1" = "--help" ]; then
+  cat <<'FOLDERUI_HELP'
+{help}
+FOLDERUI_HELP
+  exit 0
+fi
 cd {root} || exit 1
 if ! mkdir .lock 2>/dev/null; then
   echo "Operation Unavailable"
@@ -74,11 +86,38 @@ def _format_error(e: Exception) -> str:
     return "".join(traceback.format_exception_only(type(e), e)).strip()
 
 
-def _check_path(path: str) -> str:
-    parts = path.split("/")
-    if path.startswith("/") or any(not p or p.startswith(".") for p in parts):
-        raise ValueError(f"path must be relative, with no empty or hidden segments: {path!r}")
-    return path
+def _signature(path: Path):
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+class _Frame:
+    """What one draw() declared."""
+
+    def __init__(self):
+        self.files: dict[str, tuple[str, int]] = {}
+        self.actions: dict[str, tuple[str, tuple]] = {}   # path -> (help, chain of nodes that placed it)
+        self.editables: dict = {}                          # path -> Editable
+
+    def _claim(self, path: str) -> None:
+        if path in self.files or path in self.editables or (path.endswith(".sh") and path[:-3] in self.actions):
+            raise ValueError(f"{path} is declared twice")
+
+    def add_file(self, path, content, mode=0o444):
+        self._claim(path)
+        self.files[path] = (content, mode)
+
+    def add_action(self, path, help, chain):
+        if path in self.actions or f"{path}.sh" in self.files:
+            raise ValueError(f"{path} is declared twice")
+        self.actions[path] = (help, chain)
+
+    def add_editable(self, path, node):
+        self._claim(path)
+        self.editables[path] = node
 
 
 class FolderUI:
@@ -90,20 +129,20 @@ class FolderUI:
         self.root.mkdir(parents=True, exist_ok=True)
         self.closed = False
         self._dirty = threading.Event()
-        self._files: dict[str, str] = {}
-        self._inputs: list[str] = []
-        self._disk_files: dict[str, str] = {}      # files on disk managed by the framework
-        self._disk_scripts: dict[str, str] = {}
+        self._frame = _Frame()
+        self._disk: dict[str, tuple[str, int]] = {}    # files the framework wrote: path -> (content, mode)
+        self._edit_seen: dict[str, object] = {}         # editable path -> file signature last written or processed
+        self._edit_errors: dict[str, str] = {}
         self._pending: str | None = None  # action result waiting to be sent
         self._pending_input: str | None = None  # keep this button's script until its response is read
 
     # ---- implemented by subclasses ----
 
-    def draw(self) -> None:
-        pass
+    def draw(self):
+        return []
 
-    def action(self, name: str, args: list[str]) -> str | None:
-        raise NotImplementedError(f"no handler for button {name}")
+    def action(self, name: str, args: list) -> str | None:
+        raise NotImplementedError(f"no handler for {name}")
 
     def display(self, result: str) -> str:
         """Called once per response (so it may record what this participant has already seen).
@@ -114,24 +153,14 @@ class FolderUI:
     @property
     def inputs(self) -> list[str]:
         """Paths of the buttons available right now (declared by the latest draw())."""
-        return list(self._inputs)
+        return list(self._frame.actions)
 
-    # ---- call from draw() ----
-
-    def file(self, path: str, content: str) -> None:
-        self._files[_check_path(path)] = content
-
-    def input(self, path: str) -> None:
-        """Declare a button -> <path>.sh"""
-        if (path := _check_path(path)) not in self._inputs:
-            self._inputs.append(path)
+    # ---- any thread ----
 
     def close(self) -> None:
         """Finish: remove all buttons, answer the waiting script, then return from run()."""
         self.closed = True
         self._dirty.set()
-
-    # ---- any thread ----
 
     def refresh(self) -> None:
         """The state was changed by another thread: redraw this UI (does not block)."""
@@ -158,17 +187,31 @@ class FolderUI:
             changed = self._dirty.is_set()  # clear only after seeing it set; a refresh() racing a timeout is never lost
             if changed:
                 self._dirty.clear()  # the redraw below runs after this, so it sees the newest state
+            changed |= self._take_edits()
             changed |= self._take_request()
             if self._pending is None and self._pending_input and not (self.root / ".done").exists():
                 self._pending_input = None  # the response has been read
                 changed = True
             if changed:
                 self._redraw()
-            if self._pending is not None and (self._inputs or self.closed):
+            if self._pending is not None and (self._frame.actions or self.closed):
                 self._respond()
         return None
 
     # ---- internals ----
+
+    def _read(self, path: str) -> str:
+        return read_text(self.root / path, "") or ""
+
+    def _dispatch(self, path: str, args: list, chain: tuple):
+        """Offer an event to the nodes in chain, innermost first, then to action()."""
+        for i in range(len(chain) - 1, -1, -1):
+            node, base = chain[i]
+            rel = path[len(base) + 1:] if base else path
+            result = node.action(rel, args, Ctx(self, None, base, chain[:i + 1]))
+            if result is not PASS:
+                return result
+        return self.action(path, args)
 
     def _take_request(self) -> bool:
         if self._pending is not None:
@@ -178,11 +221,11 @@ class FolderUI:
         except FileNotFoundError:
             return False
         name, *args = [x.decode("utf-8", "replace") for x in raw.split(b"\0")[:-1]] or [""]
-        if name not in self._inputs:  # the screen was redrawn as the script ran: a rendering race, answered here without action/display
+        if name not in self._frame.actions:  # the screen was redrawn as the script ran: answered here, nothing called
             self._write_response(1, f"Operation Unavailable\n{name} is not on screen.")
             return False
         try:
-            result = self.action(name, args) or ""
+            result = self._dispatch(name, args, self._frame.actions[name][1]) or ""
         except Exception as e:  # the app's problem: show the error, still exit 0
             self._log_error("action")
             self._write_response(0, _format_error(e))
@@ -190,6 +233,29 @@ class FolderUI:
         self._pending_input = name
         self._pending = result
         return True
+
+    def _take_edits(self) -> bool:
+        """Apply what the user saved into Editable files since we last looked."""
+        changed = False
+        for path, node in self._frame.editables.items():
+            if path not in self._edit_seen:
+                continue  # not written yet: the next redraw does it
+            sig = _signature(self.root / path)
+            if sig == self._edit_seen[path]:
+                continue
+            changed = True
+            self._edit_seen[path] = sig
+            if sig is None:
+                continue  # deleted: the redraw writes it again
+            try:
+                node.apply(self._read(path))
+                self._edit_errors.pop(path, None)
+            except ValueError as e:
+                self._edit_errors[path] = f"Your last change to {path.rsplit('/', 1)[-1]} was not applied: {e}"
+            except Exception as e:
+                self._log_error("Editable")
+                self._edit_errors[path] = f"Your last change was not applied: {_format_error(e)}"
+        return changed
 
     def _respond(self) -> None:
         try:
@@ -206,28 +272,50 @@ class FolderUI:
         os.replace(self.root / ".request", self.root / ".done")
 
     def _redraw(self) -> None:
-        self._files, self._inputs = {}, []
-        self._call(self.draw)
+        frame = _Frame()
+        try:
+            root = Ctx(self, frame)
+            for node in self.draw() or []:
+                root.render(node)
+        except Exception:
+            self._log_error("draw")
+            frame = self._frame  # keep showing the last good screen
         if self.closed:
-            self._inputs = []
-        scripts = {f"{p}.sh": self._script(p) for p in self._inputs}
-        if self._pending_input:  # re-running the same command resumes waiting, so keep the script until the response is read
-            scripts.setdefault(f"{self._pending_input}.sh", self._script(self._pending_input))
-        self._sync(self._disk_files, self._files, None)
-        self._sync(self._disk_scripts, scripts, 0o755)
-        write_text(self.root / ".state.json", json.dumps({"inputs": self._inputs}, ensure_ascii=False) + "\n")
+            frame.actions = {}
+        self._frame = frame
+        want = dict(frame.files)
+        for path, (help, _) in frame.actions.items():
+            want[f"{path}.sh"] = (self._script(path, help), 0o755)
+        if self._pending_input and self._pending_input not in frame.actions:  # re-running the same command resumes waiting
+            want.setdefault(f"{self._pending_input}.sh", (self._script(self._pending_input, ""), 0o755))
+        for path, node in frame.editables.items():
+            if path not in self._disk and path not in self._edit_seen and (self.root / path).exists():
+                self._edit_seen[path] = None  # the user's file from before: read it next tick instead of overwriting it
+                self._disk[path] = (node.text(), 0o644)
+                self._dirty.set()
+                continue
+            want[path] = (node.text(), 0o644)
+        self._sync(want)
+        write_text(self.root / ".state.json", json.dumps({"inputs": list(frame.actions)}, ensure_ascii=False) + "\n")
 
-    def _sync(self, disk: dict[str, str], want: dict[str, str], mode: int | None) -> None:
-        for path in set(disk) - set(want):
-            (self.root / path).unlink(missing_ok=True)
-            self._prune(self.root / path)
-            del disk[path]
-        for path, content in want.items():
-            if disk.get(path) != content:
-                target = self.root / path
+    def _sync(self, want: dict) -> None:
+        for path in set(self._disk) - set(want):
+            if path in self._frame.editables:
+                continue  # the user's file from before, not read yet
+            if path in self._edit_seen:  # an Editable no longer drawn: the file is the user's, so it stays
+                del self._edit_seen[path]
+            else:
+                (self.root / path).unlink(missing_ok=True)
+                self._prune(self.root / path)
+            del self._disk[path]
+        for path, (content, mode) in want.items():
+            target = self.root / path
+            if self._disk.get(path) != (content, mode) or not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 write_text(target, content, mode)
-                disk[path] = content
+                self._disk[path] = (content, mode)
+                if path in self._frame.editables:
+                    self._edit_seen[path] = _signature(target)
 
     def _prune(self, path: Path) -> None:
         for d in path.parents:
@@ -238,14 +326,9 @@ class FolderUI:
             except OSError:
                 return
 
-    def _script(self, name: str) -> str:
-        return SCRIPT.format(name=name, root=shlex.quote(str(self.root)), qname=shlex.quote(name))
-
-    def _call(self, fn, *args) -> None:
-        try:
-            fn(*args)
-        except Exception:
-            self._log_error(fn.__name__)
+    def _script(self, name: str, help: str) -> str:
+        help = (help or f"./{name}.sh").replace("\nFOLDERUI_HELP", "\n FOLDERUI_HELP")
+        return SCRIPT.format(name=name, root=shlex.quote(str(self.root)), qname=shlex.quote(name), help=help)
 
     def _log_error(self, where: str) -> None:
         print(f"[folderui:{self.root.name}] error in {where}():", file=sys.stderr)

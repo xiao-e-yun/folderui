@@ -6,7 +6,7 @@ import argparse
 import random
 import tempfile
 
-from folderui import FolderUI
+from folderui import Action, File, FolderUI
 
 
 class Guess(FolderUI):
@@ -16,10 +16,12 @@ class Guess(FolderUI):
         self.tries: list[tuple[int, str]] = []
 
     def draw(self):
-        self.file("rules.md", "# Guess the number\n\nI picked an integer from 1 to 100. Guess it with `./guess.sh <number>`.\n")
+        out = []
+        out.append(File("rules.md", "# Guess the number\n\nI picked an integer from 1 to 100. Guess it with `./guess.sh <number>`.\n"))
         if self.tries:  # append-only, so it works well as a log
-            self.file("history.md", "".join(f"- {n}: {r}\n" for n, r in self.tries))
-        self.input("guess")
+            out.append(File("history.md", "".join(f"- {n}: {r}\n" for n, r in self.tries)))
+        out.append(Action("guess"))
+        return out
 
     def display(self, result):
         if self.closed:

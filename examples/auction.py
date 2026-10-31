@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from folderui import FolderUI
+from folderui import Action, File, FolderUI
 
 NAMES = ["Dragon Sword", "Moonlight Chalice", "Bronze Compass", "Phoenix Cloak", "Shipwreck Coin",
          "Sage's Manuscript", "Jade Mask", "Astrolabe", "Obsidian Ring", "Idol of the Old God",
@@ -267,31 +267,33 @@ class PlayerUI(FolderUI):
         self.seen = 0  # how many events this player has already been shown in a response
 
     def draw(self):
+        out = []
         with self.game.lock:
             v = self.game.view(self.me)
         if v["phase"] == "over":
             self.close()
-        self.file("rules.md", RULES.format(rounds=v["rounds"], step=STEP))
-        self.file("players.md", roster_md(v))
+        out.append(File("rules.md", RULES.format(rounds=v["rounds"], step=STEP)))
+        out.append(File("players.md", roster_md(v)))
         if v["history"]:  # append-only, so it works well as a log
-            self.file("history.md", "# Auction history\n\n" + "\n".join(v["history"]))
+            out.append(File("history.md", "# Auction history\n\n" + "\n".join(v["history"])))
         if v["owned"]:
-            self.file("owned.md", "# Treasures you own\n\n" + "\n\n".join(v["owned"]) + "\n")
+            out.append(File("owned.md", "# Treasures you own\n\n" + "\n\n".join(v["owned"]) + "\n"))
         if v["hand"]:
-            self.file("hand.md", "# Your treasures (only you can see these)\n\n" + "\n\n".join(v["hand"]) + "\n")
+            out.append(File("hand.md", "# Your treasures (only you can see these)\n\n" + "\n\n".join(v["hand"]) + "\n"))
         if v["my_lot"]:
-            self.file("my_lot.md", "# Your lot\n\n" + v["my_lot"] + "\n")
+            out.append(File("my_lot.md", "# Your lot\n\n" + v["my_lot"] + "\n"))
         if v["lot_name"]:
-            self.file("lot.md", f"# Lot: {v['lot_name']}\n\nSeller: {v['seller']}\n\n"
-                      + (f"> {v['pitch']}\n\n{v['bidding']}\n" if v["pitch"] else "(the seller is writing a pitch...)\n"))
+            out.append(File("lot.md", f"# Lot: {v['lot_name']}\n\nSeller: {v['seller']}\n\n"
+                      + (f"> {v['pitch']}\n\n{v['bidding']}\n" if v["pitch"] else "(the seller is writing a pitch...)\n")))
 
         todo = v["todo"]
         if todo in ("join", "pick", "describe"):
-            self.input(todo)
+            out.append(Action(todo))
         elif todo == "bid":
             if v["min_bid"] <= v["money"]:
-                self.input("bid")
-            self.input("pass")
+                out.append(Action("bid"))
+            out.append(Action("pass"))
+        return out
 
     def display(self, result):
         with self.game.lock:
@@ -342,19 +344,21 @@ class SpectatorUI(FolderUI):
         self.game = game
 
     def draw(self):
+        out = []
         with self.game.lock:
             v = self.game.view("spectator")
             events = list(self.game.events)
         if v["phase"] == "over":
             self.close()
-        self.file("players.md", roster_md(v))
+        out.append(File("players.md", roster_md(v)))
         if v["lots"]:
-            self.file("truth.md", "# The truth about every lot\n\n" + "\n\n".join(v["lots"]) + "\n")
+            out.append(File("truth.md", "# The truth about every lot\n\n" + "\n\n".join(v["lots"]) + "\n"))
         if v["lot_name"]:
-            self.file("lot.md", f"# Lot: {v['lot_name']}\n\n> {v['pitch'] or '(the seller is writing a pitch...)'}\n\n"
-                      + (v["bidding"] or "") + "\n")
+            out.append(File("lot.md", f"# Lot: {v['lot_name']}\n\n> {v['pitch'] or '(the seller is writing a pitch...)'}\n\n"
+                      + (v["bidding"] or "") + "\n"))
         if events:
-            self.file("log.md", "".join(e + "\n\n" for e in events))
+            out.append(File("log.md", "".join(e + "\n\n" for e in events)))
+        return out
 
 
 def main():
