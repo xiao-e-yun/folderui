@@ -27,10 +27,9 @@ class Session:
     def read(self, path: str) -> str:
         return read_text(self.root / path, "")
 
-    def input(self, path: str, *args: str, timeout: float | None = None) -> tuple[bool, str]:
-        """Press a button and wait for the response. Returns (ok, response text).
-        ok is False when the operation was unavailable (the button is gone, the app crashed, ...);
-        whether the app accepted the action is up to its response text."""
+    def input(self, path: str, *args: str, timeout: float | None = None) -> tuple[int, str]:
+        """Press a button and wait for the response. Returns (exit code, response text), as the button script
+        would: 0 the app answered normally, 1 the app raised (the text says why), 2 Operation Unavailable."""
         lock, request = self.root / ".lock", self.root / ".request"
         try:
             lock.mkdir()
@@ -48,6 +47,6 @@ class Session:
             if deadline is not None and time.monotonic() > deadline:
                 raise TimeoutError("timed out waiting for a response")
             time.sleep(self.poll)
-        code, _, text = read_text(self.root / ".response", "1\n").partition("\n")
+        code, _, text = read_text(self.root / ".response", "2\n").partition("\n")
         (self.root / ".done").unlink(missing_ok=True)
-        return code.strip() == "0", text.rstrip("\n")
+        return int(code.strip() or 2), text.rstrip("\n")

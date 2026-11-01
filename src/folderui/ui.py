@@ -4,17 +4,19 @@ Subclasses implement:
     draw()                 Return the screen as a list of nodes (Folder, File, Action, Editable, or your own).
                            Called every frame; must not change state.
     action(name, args)     A button was pressed (name is its full path) or a node sent an event up with ctx.emit().
-                           Return the response text (a rejection is just text, too).
+                           Return the response text, or raise to say it failed (e.g. a rejection).
     display(result)        (optional) Called once per response; its return value is the response text.
                            Defaults to returning result unchanged.
 
 Files are written only when what draw() says differs from the last frame (or the file was deleted), so a file
 the user changed stays as it is until its content changes. Modes tell what each file is: 444 to read,
 644 to edit (Editable), 755 to run (Action). A button script blocks until the first frame after the action that
-has a button available (or close()), then prints display(result) and exits with code 0. If action() or display()
-raises, that is the app's problem: the error is printed instead, still with exit code 0. Exit code 1
-("Operation Unavailable") is only for the framework failing to deliver the action (another action in flight,
-or a button that is gone). `./<button>.sh --help` prints the button's help without pressing it.
+has a button available (or close()), then prints display(result). Exit codes:
+    0  action() and display() returned normally
+    1  action() or display() raised: the error message is the response (a crash's traceback goes to stderr)
+    2  the framework could not deliver the action ("Operation Unavailable": another action in flight, or a button
+       that is gone); action() was not called
+`./<button>.sh --help` prints the button's help without pressing it.
 
 When another thread changes the state (e.g. another player's move), call refresh() to redraw this UI.
 Editable data is updated on this UI's own thread, between frames.
@@ -51,11 +53,11 @@ if [ "$1" = "--help" ]; then
 FOLDERUI_HELP
   exit 0
 fi
-cd {root} || exit 1
+cd {root} || exit 2
 if ! mkdir .lock 2>/dev/null; then
   echo "Operation Unavailable"
   echo "Another action is being submitted."
-  exit 1
+  exit 2
 fi
 printf '%s\\0' {qname} "$@" > .request.new
 if [ -e .request ]; then  # interrupted last time (e.g. the agent's command timed out): same command = keep waiting
@@ -64,7 +66,7 @@ if [ -e .request ]; then  # interrupted last time (e.g. the agent's command time
     rmdir .lock
     echo "Operation Unavailable"
     echo "The previous action is still waiting; run the same command again to keep waiting."
-    exit 1
+    exit 2
   fi
   rm -f .request.new
 elif [ -e .done ] && cmp -s .done .request.new; then  # response is ready but has not been read yet
@@ -84,6 +86,12 @@ exit "$code"
 
 def _format_error(e: Exception) -> str:
     return "".join(traceback.format_exception_only(type(e), e)).strip()
+
+
+def _error_text(e: Exception) -> str:
+    """What the user sees when the app raised: a ValueError is the app saying no, in its own words; anything
+    else is a crash, shown with its type."""
+    return str(e) if isinstance(e, ValueError) and str(e) else _format_error(e)
 
 
 def _signature(path: Path):
@@ -222,13 +230,14 @@ class FolderUI:
             return False
         name, *args = [x.decode("utf-8", "replace") for x in raw.split(b"\0")[:-1]] or [""]
         if name not in self._frame.actions:  # the screen was redrawn as the script ran: answered here, nothing called
-            self._write_response(1, f"Operation Unavailable\n{name} is not on screen.")
+            self._write_response(2, f"Operation Unavailable\n{name} is not on screen.")
             return False
         try:
             result = self._dispatch(name, args, self._frame.actions[name][1]) or ""
-        except Exception as e:  # the app's problem: show the error, still exit 0
-            self._log_error("action")
-            self._write_response(0, _format_error(e))
+        except Exception as e:  # the app said no (or crashed): exit 1 with the reason
+            if not isinstance(e, ValueError):
+                self._log_error("action")
+            self._write_response(1, _error_text(e))
             return True  # the state may have changed halfway, so redraw
         self._pending_input = name
         self._pending = result
@@ -258,12 +267,14 @@ class FolderUI:
         return changed
 
     def _respond(self) -> None:
+        code = 0
         try:
             text = self.display(self._pending)
         except Exception as e:
-            self._log_error("display")
-            text = _format_error(e)
-        self._write_response(0, text)
+            if not isinstance(e, ValueError):
+                self._log_error("display")
+            code, text = 1, _error_text(e)
+        self._write_response(code, text)
         self._pending = None
 
     def _write_response(self, code: int, text: str | None) -> None:

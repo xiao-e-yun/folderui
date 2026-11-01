@@ -64,10 +64,15 @@ stays as it is until its content changes.
 
 The response is `display(result)`; without a `display()` it is just the action's return value. Like HTTP:
 
-- **exit 0** (200): the app answered. What the text says, including whether the action was accepted, is up to the app.
-  If `action()` or `display()` raises, that is the app's problem: the error is printed as the response (the full
-  traceback goes to the host's stderr).
-- **exit 1** (4xx): `Operation Unavailable` plus the reason: another action is in flight, or the button is no longer on screen.
+- **exit 0**: `action()` and `display()` returned normally; the text is the response.
+- **exit 1**: `action()` or `display()` raised. Raise a `ValueError` to say no (a rejection, or an order that did not
+  go as asked): its message is the response. Any other exception is a crash: it is printed with its type, and the
+  traceback goes to the host's stderr.
+- **exit 2**: `Operation Unavailable` plus the reason: another action is in flight, or the button is no longer on
+  screen. `action()` was not called.
+
+So agents can chain buttons with `&&` and stop at the first one that did not go as asked:
+`./goto.sh door && ./open.sh door`.
 
 The framework never appends a button list or a summary of screen changes: with a large screen (a Blender bridge,
 a map game) that is only noise, so `display()` decides what to tell the agent, e.g. "your turn, use ./bid.sh <amount>"
@@ -181,19 +186,19 @@ s = Session("/tmp/folderui-auction-xxxx/player_0")
 s.ready()
 print(s.read("rules.md"))
 while inputs := s.inputs():              # buttons available right now; empty means closed
-    ok, text = s.input("bid", "40")
+    code, text = s.input("bid", "40")    # the exit code a script would give: 0, 1 or 2
 ```
 
 ## Details
 
 - Scripts wait indefinitely and never time out on their own. If the agent's command is killed by a timeout, the
   request has already been sent: **run the same command again to keep waiting or get the response** (it is not
-  sent twice); running a different button is rejected (exit code 1). The button's script is kept until its
+  sent twice); running a different button is rejected (exit code 2). The button's script is kept until its
   response has been read.
 - Pressing a button that is no longer on screen (the screen was redrawn just as the script ran) gets an immediate
-  "Operation Unavailable" response from the framework (exit code 1), without calling `action()` or `display()`.
+  "Operation Unavailable" response from the framework (exit code 2), without calling `action()` or `display()`.
 - Concurrent presses in the same folder are serialized by a `.lock` directory; a press that finds it held is
-  rejected (exit code 1).
+  rejected (exit code 2).
 - Protocol files are hidden: `.request`, `.response`, `.done`, `.lock`, `.state.json`.
   An agent that cannot run scripts can write `.request` directly (button path and arguments, NUL-separated).
 

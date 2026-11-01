@@ -42,18 +42,18 @@ def counter(tmp_path):
 def test_session_press(counter):
     ui, s = counter
     assert s.inputs() == ["add"]
-    ok, text = s.input("add", "2", timeout=5)
-    assert ok and text == "can only add 1"  # a rejection is just the app's text
-    ok, text = s.input("add", "1", timeout=5)
-    assert ok and text == "now 1"
+    code, text = s.input("add", "2", timeout=5)
+    assert code == 0 and text == "can only add 1"  # a rejection is just the app's text
+    code, text = s.input("add", "1", timeout=5)
+    assert code == 0 and text == "now 1"
     assert s.read("count.md") == "1\n"
 
 
 def test_close_removes_buttons(counter):
     ui, s = counter
     for _ in range(3):
-        ok, text = s.input("add", "1", timeout=5)
-    assert ok and text == "now 3"
+        code, text = s.input("add", "1", timeout=5)
+    assert code == 0 and text == "now 3"
     assert s.inputs() == []
     for _ in range(50):  # the kept script is removed on the frame after the response is read
         if not (ui.root / "add.sh").exists():
@@ -136,15 +136,15 @@ def test_multiplayer_blocks_until_everyone_ready(tmp_path):
     t.join(timeout=0.5)
     assert t.is_alive()  # the other player isn't ready, so p0's button blocks
 
-    ok, text = s1.input("ready", timeout=10)
+    code, text = s1.input("ready", timeout=10)
     t.join(timeout=10)
-    assert ok and "started" in text and s1.inputs() == ["play"]
-    ok, text = result["r"]
-    assert ok and "started" in text
+    assert code == 0 and "started" in text and s1.inputs() == ["play"]
+    code, text = result["r"]
+    assert code == 0 and "started" in text
 
     for s in (s0, s1):
-        ok, text = s.input("play", timeout=10)
-        assert ok and text == "played"  # messages already seen are not repeated
+        code, text = s.input("play", timeout=10)
+        assert code == 0 and text == "played"  # messages already seen are not repeated
     for th in threads:
         th.join(timeout=10)
         assert not th.is_alive()
@@ -158,7 +158,7 @@ def test_interrupted_and_resume(tmp_path):
         subprocess.run([script], capture_output=True, text=True, timeout=1)
 
     r = subprocess.run([script, "other"], capture_output=True, text=True, timeout=10)
-    assert r.returncode == 1 and "still waiting" in r.stdout  # a different command is rejected
+    assert r.returncode == 2 and "still waiting" in r.stdout  # a different command is rejected
 
     s1.input("ready", timeout=10)
     r = subprocess.run([script], capture_output=True, text=True, timeout=10)
@@ -171,28 +171,28 @@ def test_stale_input_is_rejected_without_calling_action(counter):
     ui, s = counter
     calls = []
     ui.action = lambda name, args: calls.append(name)
-    ok, text = s.input("gone", timeout=5)  # no such button on screen (e.g. a script from an old screen)
-    assert not ok and text == "Operation Unavailable\ngone is not on screen." and calls == []
+    code, text = s.input("gone", timeout=5)  # no such button on screen (e.g. a script from an old screen)
+    assert code == 2 and text == "Operation Unavailable\ngone is not on screen." and calls == []
 
 
 def test_concurrent_press_is_rejected_by_lock(counter):
     ui, s = counter
     (ui.root / ".lock").mkdir()  # another script is in the middle of submitting
     r = subprocess.run([str(ui.root / "add.sh"), "1"], capture_output=True, text=True, timeout=10)
-    assert r.returncode == 1 and r.stdout == "Operation Unavailable\nAnother action is being submitted.\n"
+    assert r.returncode == 2 and r.stdout == "Operation Unavailable\nAnother action is being submitted.\n"
     (ui.root / ".lock").rmdir()
-    ok, text = s.input("add", "1", timeout=5)
-    assert ok and text == "now 1"
+    code, text = s.input("add", "1", timeout=5)
+    assert code == 0 and text == "now 1"
 
 
 def test_exception_in_action_is_printed(counter):
     ui, s = counter
     ui.action = lambda name, args: 1 / 0
-    ok, text = s.input("add", "1", timeout=5)  # the app's problem: delivered, the error is the response
-    assert ok and text == "ZeroDivisionError: division by zero"
+    code, text = s.input("add", "1", timeout=5)  # the app crashed: delivered, exit 1, the error is the response
+    assert code == 1 and text == "ZeroDivisionError: division by zero"
     ui.action = Counter.action.__get__(ui)
-    ok, text = s.input("add", "1", timeout=5)  # the UI keeps working
-    assert ok and text == "now 1"
+    code, text = s.input("add", "1", timeout=5)  # the UI keeps working
+    assert code == 0 and text == "now 1"
 
 
 def wait_for(fn, timeout=5):
@@ -279,11 +279,11 @@ def test_events_bubble_from_nodes_to_the_ui(tmp_path):
     ui = Shop(tmp_path / "ui")
     thread, s = start(ui)
     assert s.inputs() == ["player/inventory/apply", "player/inventory/other"]
-    assert s.input("player/inventory/apply", timeout=5) == (True, "nothing to move") and ui.seen == []
-    assert s.input("player/inventory/apply", "metal", timeout=5) == (True, "moved metal")
+    assert s.input("player/inventory/apply", timeout=5) == (0, "nothing to move") and ui.seen == []
+    assert s.input("player/inventory/apply", "metal", timeout=5) == (0, "moved metal")
     assert ui.seen == [("player/move", ["metal"])]
     assert s.read("player/inventory/items.md") == "rope\nmetal\n"
-    assert s.input("player/inventory/other", timeout=5) == (True, "top got player/inventory/other")
+    assert s.input("player/inventory/other", timeout=5) == (0, "top got player/inventory/other")
     stop(ui, thread)
 
 
@@ -339,3 +339,22 @@ def test_editable_reads_the_users_file_from_before(tmp_path):
     assert wait_for(lambda: s.read("view.md") == "hello x3\n")
     stop(ui, thread)
     assert (tmp_path / "ui" / "prefs.toml").exists()  # closing leaves the user's file
+
+
+def test_exit_codes(counter):
+    ui, s = counter
+    r = subprocess.run([str(ui.root / "add.sh"), "1"], capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0 and r.stdout == "now 1\n"
+
+    def refuse(name, args):
+        raise ValueError("Rejected: not now")
+    ui.action = refuse
+    r = subprocess.run([str(ui.root / "add.sh"), "1"], capture_output=True, text=True, timeout=10)
+    assert r.returncode == 1 and r.stdout == "Rejected: not now\n"  # the app said no, in its own words
+    ui.action = Counter.action.__get__(ui)
+
+    def interrupted(result):
+        raise ValueError(f"{result}, but something came up")
+    ui.display = interrupted
+    r = subprocess.run([str(ui.root / "add.sh"), "1"], capture_output=True, text=True, timeout=10)
+    assert r.returncode == 1 and r.stdout == "now 2, but something came up\n"  # display() can fail it too
