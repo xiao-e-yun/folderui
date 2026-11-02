@@ -11,7 +11,7 @@ Running a button **blocks until you have the next decision to make**, then print
 So an agent's loop is just "run a button → read the response → run the next button", with no extra waiting or polling.
 
 ```sh
-pip install folderui     # or: uv add folderui. Standard library only; needs a POSIX shell.
+pip install folderui     # or: uv add folderui. Standard library only; needs a POSIX shell (on Windows: Git Bash).
 ```
 
 ```console

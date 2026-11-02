@@ -38,7 +38,7 @@ import time
 import traceback
 from pathlib import Path
 
-from .fsutil import read_text, write_text
+from .fsutil import read_text, remove, write_text
 from .nodes import PASS, Ctx
 
 PROTOCOL_FILES = (".request", ".request.new", ".response", ".done")
@@ -316,7 +316,7 @@ class FolderUI:
             if path in self._edit_seen:  # an Editable no longer drawn: the file is the user's, so it stays
                 del self._edit_seen[path]
             else:
-                (self.root / path).unlink(missing_ok=True)
+                remove(self.root / path)
                 self._prune(self.root / path)
             del self._disk[path]
         for path, (content, mode) in want.items():
